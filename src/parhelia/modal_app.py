@@ -85,6 +85,7 @@ cpu_image = (
         "prometheus-client>=0.21.0",
         "aiofiles>=24.0.0",
         "psutil>=5.9.0",
+        "toml>=0.10.0",
     ])
     .run_commands([
         # Install Bun for plugin tooling
@@ -95,14 +96,17 @@ cpu_image = (
         # Install Claude Code native binary
         "curl -fsSL https://claude.ai/install.sh | sh || echo 'Claude install may need manual setup'",
     ])
-    # Copy entrypoint script into the image
+    # Copy entrypoint script into the image (copy=True needed for subsequent run_commands)
     .add_local_file(
         str(_PACKAGE_DIR / "scripts" / "entrypoint.sh"),
         "/entrypoint.sh",
+        copy=True,
     )
     .run_commands([
         "chmod +x /entrypoint.sh",
     ])
+    # Add parhelia package source for remote functions
+    .add_local_python_source("parhelia")
 )
 
 # GPU image extends CPU with CUDA support
@@ -113,10 +117,17 @@ gpu_image = cpu_image.run_commands([
 # Secrets configuration - these must be created in Modal dashboard
 # modal secret create anthropic-api-key ANTHROPIC_API_KEY=sk-...
 # modal secret create github-token GITHUB_TOKEN=ghp_...
-PARHELIA_SECRETS = [
-    modal.Secret.from_name("anthropic-api-key"),
-    modal.Secret.from_name("github-token"),
-]
+#
+# For testing without secrets, set PARHELIA_SKIP_SECRETS=1
+_SKIP_SECRETS = os.environ.get("PARHELIA_SKIP_SECRETS", "").lower() in ("1", "true", "yes")
+
+if _SKIP_SECRETS:
+    PARHELIA_SECRETS: list = []
+else:
+    PARHELIA_SECRETS = [
+        modal.Secret.from_name("anthropic-api-key"),
+        modal.Secret.from_name("github-token"),
+    ]
 
 # =============================================================================
 # Sandbox Creation - For Interactive Claude Code Sessions
