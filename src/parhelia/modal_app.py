@@ -7,12 +7,27 @@ Implements:
 
 Key Design Decision: Use Sandboxes for interactive Claude Code sessions
 (dynamic, long-lived), and Functions only for short batch operations.
+
+Usage:
+    # Deploy the app
+    modal deploy src/parhelia/modal_app.py
+
+    # Run health check
+    modal run src/parhelia/modal_app.py::health_check
+
+    # Initialize volume structure
+    modal run src/parhelia/modal_app.py::init_volume_structure
+
+    # Local development
+    uv run python -m parhelia.modal_app
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import modal
@@ -21,6 +36,9 @@ from parhelia.config import load_config
 
 # Load configuration
 config = load_config()
+
+# Get the directory containing this file for local file references
+_PACKAGE_DIR = Path(__file__).parent
 
 # =============================================================================
 # Modal App Definition - SPEC-01.11
@@ -60,16 +78,30 @@ cpu_image = (
         "build-essential",
         "unzip",
         "procps",  # For ps, top commands
+        "zstd",  # For checkpoint compression
     ])
     .pip_install([
         "anthropic>=0.40.0",
         "prometheus-client>=0.21.0",
+        "aiofiles>=24.0.0",
+        "psutil>=5.9.0",
     ])
     .run_commands([
         # Install Bun for plugin tooling
         "curl -fsSL https://bun.sh/install | bash",
+        # Add bun to PATH for subsequent commands
+        "echo 'export BUN_INSTALL=\"$HOME/.bun\"' >> ~/.bashrc",
+        "echo 'export PATH=\"$BUN_INSTALL/bin:$PATH\"' >> ~/.bashrc",
         # Install Claude Code native binary
-        "curl -fsSL https://claude.ai/install.sh | sh",
+        "curl -fsSL https://claude.ai/install.sh | sh || echo 'Claude install may need manual setup'",
+    ])
+    # Copy entrypoint script into the image
+    .add_local_file(
+        str(_PACKAGE_DIR / "scripts" / "entrypoint.sh"),
+        "/entrypoint.sh",
+    )
+    .run_commands([
+        "chmod +x /entrypoint.sh",
     ])
 )
 
@@ -77,6 +109,14 @@ cpu_image = (
 gpu_image = cpu_image.run_commands([
     "pip install torch --index-url https://download.pytorch.org/whl/cu121",
 ])
+
+# Secrets configuration - these must be created in Modal dashboard
+# modal secret create anthropic-api-key ANTHROPIC_API_KEY=sk-...
+# modal secret create github-token GITHUB_TOKEN=ghp_...
+PARHELIA_SECRETS = [
+    modal.Secret.from_name("anthropic-api-key"),
+    modal.Secret.from_name("github-token"),
+]
 
 # =============================================================================
 # Sandbox Creation - For Interactive Claude Code Sessions
@@ -118,10 +158,7 @@ async def create_claude_sandbox(
 
     sandbox = await modal.Sandbox.create.aio(
         image=image,
-        secrets=[
-            modal.Secret.from_name("anthropic-api-key"),
-            modal.Secret.from_name("github-token"),
-        ],
+        secrets=PARHELIA_SECRETS,
         volumes={"/vol/parhelia": volume},
         gpu=gpu,
         timeout=timeout_hours * 3600,
@@ -157,7 +194,7 @@ async def run_in_sandbox(sandbox: modal.Sandbox, command: list[str]) -> str:
 @app.function(
     image=cpu_image,
     volumes={"/vol/parhelia": volume},
-    secrets=[modal.Secret.from_name("anthropic-api-key")],
+    secrets=PARHELIA_SECRETS,
     cpu=CPU_CONFIG["cpu"],
     memory=CPU_CONFIG["memory"],
     timeout=300,  # 5 min max for batch ops
@@ -334,3 +371,91 @@ class SandboxManager:
             List of SandboxInfo for all active sandboxes.
         """
         return list(self.active_sandboxes.values())
+
+
+# =============================================================================
+# CLI Entrypoints - For local development and testing
+# =============================================================================
+
+
+@app.local_entrypoint()
+def main(
+    command: str = "status",
+    task_id: str = "cli-test",
+    gpu: str | None = None,
+):
+    """Parhelia CLI entrypoint.
+
+    Usage:
+        modal run src/parhelia/modal_app.py  # Show status
+        modal run src/parhelia/modal_app.py --command health  # Health check
+        modal run src/parhelia/modal_app.py --command init  # Init volume
+        modal run src/parhelia/modal_app.py --command sandbox --task-id my-task  # Create sandbox
+
+    Args:
+        command: Command to run (status, health, init, sandbox)
+        task_id: Task ID for sandbox creation
+        gpu: GPU type for sandbox (A10G, A100, etc.)
+    """
+    import json
+
+    if command == "status":
+        print("Parhelia Modal App Status")
+        print("=" * 40)
+        print(f"App Name: {app.name}")
+        print(f"Volume: {config.modal.volume_name}")
+        print(f"CPU Config: {CPU_CONFIG}")
+        print(f"Supported GPUs: {SUPPORTED_GPUS}")
+        print("\nTo deploy: modal deploy src/parhelia/modal_app.py")
+        print("To run health check: modal run src/parhelia/modal_app.py --command health")
+
+    elif command == "health":
+        print("Running health check...")
+        result = health_check.remote()
+        print(json.dumps(result, indent=2))
+
+    elif command == "init":
+        print("Initializing volume structure...")
+        result = init_volume_structure.remote()
+        print(json.dumps(result, indent=2))
+
+    elif command == "sandbox":
+        import asyncio
+
+        async def create_and_test():
+            print(f"Creating sandbox for task: {task_id}")
+            if gpu:
+                print(f"GPU: {gpu}")
+
+            sandbox = await create_claude_sandbox(task_id, gpu=gpu)
+            print(f"Sandbox created: {sandbox}")
+
+            # Run a simple test
+            print("\nRunning test command...")
+            output = await run_in_sandbox(sandbox, ["echo", "Hello from Parhelia!"])
+            print(f"Output: {output}")
+
+            # Check Claude
+            print("\nChecking Claude Code...")
+            try:
+                claude_output = await run_in_sandbox(
+                    sandbox,
+                    ["/root/.claude/local/claude", "--version"],
+                )
+                print(f"Claude version: {claude_output}")
+            except Exception as e:
+                print(f"Claude check failed: {e}")
+
+            return sandbox
+
+        asyncio.run(create_and_test())
+
+    else:
+        print(f"Unknown command: {command}")
+        print("Available commands: status, health, init, sandbox")
+
+
+# Allow running as module
+if __name__ == "__main__":
+    print("Use 'modal run src/parhelia/modal_app.py' to run this app")
+    print("Or 'modal deploy src/parhelia/modal_app.py' to deploy")
