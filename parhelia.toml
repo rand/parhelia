@@ -1,0 +1,17 @@
+# Parhelia Configuration
+# See SPEC-01 for details on configuration options
+
+[modal]
+# Modal region for container deployment
+# Options: us-east, us-west, eu-west
+region = "us-east"
+
+# Volume name for persistent storage
+volume_name = "parhelia-vol"
+
+# CPU container resources
+cpu_count = 4
+memory_mb = 16384
+
+# Default session timeout (hours)
+default_timeout_hours = 24
