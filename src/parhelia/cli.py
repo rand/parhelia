@@ -350,25 +350,51 @@ def detach(ctx: CLIContext, session_id: str) -> None:
 
 
 # =============================================================================
-# Checkpoint Command
+# Checkpoint Command Group [SPEC-07.40, SPEC-07.41]
 # =============================================================================
 
 
-@cli.command()
+class CheckpointGroup(click.Group):
+    """Custom group that handles legacy 'checkpoint SESSION_ID' syntax."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        """Handle legacy checkpoint command syntax."""
+        # If first arg doesn't look like a subcommand and isn't an option,
+        # treat it as the legacy 'checkpoint SESSION_ID [-m MSG]' syntax
+        if args and not args[0].startswith("-"):
+            # Check if it's a known subcommand
+            if args[0] not in self.commands:
+                # Legacy mode: prepend 'create' subcommand
+                args = ["create"] + args
+        return super().parse_args(ctx, args)
+
+
+@cli.group(cls=CheckpointGroup)
+def checkpoint() -> None:
+    """Checkpoint management commands.
+
+    Examples:
+        parhelia checkpoint my-session           # Create checkpoint (legacy)
+        parhelia checkpoint create my-session    # Create checkpoint
+        parhelia checkpoint rollback cp-abc123   # Rollback to checkpoint
+        parhelia checkpoint diff cp-a cp-b       # Compare checkpoints
+        parhelia checkpoint list                 # List checkpoints
+    """
+    pass
+
+
+@checkpoint.command("create")
 @click.argument("session_id")
 @click.option(
     "-m", "--message",
     help="Checkpoint message/description",
 )
 @pass_context
-def checkpoint(ctx: CLIContext, session_id: str, message: str | None) -> None:
+def checkpoint_create(ctx: CLIContext, session_id: str, message: str | None) -> None:
     """Create a checkpoint for a session."""
-    from parhelia.session import CheckpointTrigger
+    from parhelia.checkpoint import CheckpointTrigger
 
     async def _checkpoint():
-        # Check if session can be checkpointed
-        can_resume = await ctx.resume_manager.can_resume(session_id)
-
         # Create a mock session for checkpointing
         # In production, this would get the actual session state
         session = Session(
@@ -940,6 +966,540 @@ def env_diff(
         click.echo(f"Time: {cp_a.created_at} → {cp_b.created_at}")
         click.echo()
         click.echo(format_environment_diff(diff))
+
+
+# =============================================================================
+# Memory Command Group [SPEC-07.31]
+# =============================================================================
+
+
+@cli.group()
+def memory() -> None:
+    """Project memory commands.
+
+    Implements [SPEC-07.31].
+    """
+    pass
+
+
+@memory.command("save")
+@click.argument("key")
+@click.argument("value")
+@click.option(
+    "--category",
+    type=click.Choice(["architecture", "convention", "gotcha"]),
+    default="convention",
+    help="Memory category",
+)
+@pass_context
+def memory_save(ctx: CLIContext, key: str, value: str, category: str) -> None:
+    """Save knowledge to project memory.
+
+    Implements [SPEC-07.31].
+
+    Example:
+        parhelia memory save "testing" "Always run pytest with -v flag"
+        parhelia memory save "auth" "Uses JWT tokens" --category convention
+    """
+    from parhelia.project_memory import ProjectMemoryManager
+
+    memory_path = Path(ctx.config.paths.volume_root) / "memory" / "project.json"
+    manager = ProjectMemoryManager(memory_path)
+
+    if category == "architecture":
+        manager.set_architecture(value, key_files=[key])
+        click.secho(f"✓ Architecture knowledge saved", fg="green")
+    elif category == "convention":
+        manager.set_convention(key, value)
+        click.secho(f"✓ Convention saved: {key}", fg="green")
+    elif category == "gotcha":
+        manager.add_gotcha(value, session_id="cli")
+        click.secho(f"✓ Gotcha recorded", fg="green")
+
+    manager.save()
+
+
+@memory.command("recall")
+@click.argument("query")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+@pass_context
+def memory_recall(ctx: CLIContext, query: str, as_json: bool) -> None:
+    """Recall knowledge from project memory.
+
+    Implements [SPEC-07.31].
+
+    Example:
+        parhelia memory recall "testing"
+        parhelia memory recall "auth patterns" --json
+    """
+    from parhelia.project_memory import ProjectMemoryManager
+
+    memory_path = Path(ctx.config.paths.volume_root) / "memory" / "project.json"
+    manager = ProjectMemoryManager(memory_path)
+
+    results = manager.recall(query)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2, default=str))
+    else:
+        click.echo(f"Memory Recall: '{query}'")
+        click.echo("=" * 40)
+
+        if results.get("architecture"):
+            arch = results["architecture"]
+            click.echo(f"\nArchitecture:")
+            click.echo(f"  {arch.get('summary', 'No summary')}")
+            if arch.get("key_files"):
+                click.echo(f"  Key files: {', '.join(arch['key_files'][:5])}")
+
+        if results.get("conventions"):
+            click.echo(f"\nConventions:")
+            for key, value in results["conventions"].items():
+                click.echo(f"  {key}: {value}")
+
+        if results.get("gotchas"):
+            click.echo(f"\nGotchas:")
+            for gotcha in results["gotchas"][:5]:
+                click.echo(f"  • {gotcha.get('description', gotcha)}")
+
+        if results.get("recent_sessions"):
+            click.echo(f"\nRecent Sessions:")
+            for session in results["recent_sessions"][:3]:
+                click.echo(f"  • {session.get('summary', session)}")
+
+
+@memory.command("show")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+@pass_context
+def memory_show(ctx: CLIContext, as_json: bool) -> None:
+    """Show all project memory."""
+    from parhelia.project_memory import ProjectMemoryManager
+
+    memory_path = Path(ctx.config.paths.volume_root) / "memory" / "project.json"
+    manager = ProjectMemoryManager(memory_path)
+
+    if as_json:
+        click.echo(json.dumps(manager.memory.to_dict(), indent=2, default=str))
+    else:
+        mem = manager.memory
+        click.echo("Project Memory")
+        click.echo("=" * 40)
+
+        if mem.architecture:
+            click.echo(f"\nArchitecture:")
+            click.echo(f"  {mem.architecture.summary}")
+
+        click.echo(f"\nConventions ({len(mem.conventions)}):")
+        for conv in mem.conventions[:10]:
+            click.echo(f"  {conv.key}: {conv.value}")
+
+        click.echo(f"\nGotchas ({len(mem.gotchas)}):")
+        for gotcha in mem.gotchas[:5]:
+            click.echo(f"  • {gotcha.description}")
+
+        click.echo(f"\nSession History ({len(mem.session_history)}):")
+        for session in mem.session_history[-5:]:
+            click.echo(f"  • {session.session_id}: {session.summary}")
+
+
+# =============================================================================
+# Checkpoint Subcommands [SPEC-07.40, SPEC-07.41]
+# =============================================================================
+
+
+@checkpoint.command("rollback")
+@click.argument("checkpoint_id")
+@click.option(
+    "--session",
+    "session_id",
+    help="Session ID (if checkpoint ID is ambiguous)",
+)
+@click.option(
+    "-y", "--yes",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@pass_context
+def checkpoint_rollback(
+    ctx: CLIContext,
+    checkpoint_id: str,
+    session_id: str | None,
+    yes: bool,
+) -> None:
+    """Rollback workspace to a checkpoint state.
+
+    Implements [SPEC-07.40].
+
+    Safety guarantees:
+    - Creates safety checkpoint before rollback
+    - Stashes uncommitted changes
+    - Verifies target checkpoint is readable
+    - Provides recovery on failure
+
+    Example:
+        parhelia checkpoint rollback cp-abc123
+        parhelia checkpoint rollback cp-abc123 --session my-session -y
+    """
+    from parhelia.rollback import WorkspaceRollback
+
+    async def _rollback():
+        # Find checkpoint
+        target_cp = None
+        if session_id:
+            checkpoints = await ctx.checkpoint_manager.list_checkpoints(session_id)
+            for cp in checkpoints:
+                if cp.id == checkpoint_id:
+                    target_cp = cp
+                    break
+        else:
+            # Search all sessions
+            checkpoint_root = ctx.checkpoint_manager.checkpoint_root
+            if checkpoint_root.exists():
+                for sess_dir in checkpoint_root.iterdir():
+                    if sess_dir.is_dir():
+                        checkpoints = await ctx.checkpoint_manager.list_checkpoints(
+                            sess_dir.name
+                        )
+                        for cp in checkpoints:
+                            if cp.id == checkpoint_id:
+                                target_cp = cp
+                                break
+                        if target_cp:
+                            break
+
+        if not target_cp:
+            click.secho(f"Checkpoint not found: {checkpoint_id}", fg="red")
+            sys.exit(1)
+
+        # Show rollback plan
+        click.echo(f"Rollback Plan")
+        click.echo("=" * 40)
+        click.echo(f"Target: {target_cp.id}")
+        click.echo(f"Session: {target_cp.session_id}")
+        click.echo(f"Created: {target_cp.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        if target_cp.uncommitted_changes:
+            click.echo(f"Files ({len(target_cp.uncommitted_changes)}):")
+            for f in target_cp.uncommitted_changes[:5]:
+                click.echo(f"  - {f}")
+        click.echo()
+
+        # Confirm unless -y flag
+        if not yes:
+            if not click.confirm("Proceed with rollback?"):
+                click.echo("Rollback cancelled.")
+                return
+
+        # Perform rollback
+        rollback = WorkspaceRollback(
+            checkpoint_manager=ctx.checkpoint_manager,
+            workspace_dir=target_cp.working_directory,
+            session_id=target_cp.session_id,
+        )
+
+        def progress_callback(msg: str, phase) -> None:
+            click.echo(f"  {msg}")
+
+        rollback.set_progress_callback(progress_callback)
+
+        result = await rollback.rollback(
+            checkpoint_id,
+            skip_confirmation=True,  # Already confirmed above
+        )
+
+        click.echo()
+        if result.success:
+            click.secho("✓ Rollback completed successfully", fg="green")
+            click.echo(f"  Safety checkpoint: {result.safety_checkpoint_id}")
+            if result.stash_ref:
+                click.echo(f"  Changes stashed: {result.stash_ref}")
+        else:
+            click.secho(f"✗ Rollback failed: {result.error_message}", fg="red")
+            if result.recovery_performed:
+                click.echo("  Recovery was performed to restore previous state.")
+            sys.exit(1)
+
+    asyncio.run(_rollback())
+
+
+@checkpoint.command("diff")
+@click.argument("checkpoint_a")
+@click.argument("checkpoint_b")
+@click.option(
+    "--session",
+    "session_id",
+    help="Session ID (if checkpoint IDs are ambiguous)",
+)
+@click.option(
+    "--file",
+    "file_path",
+    help="Show diff for specific file",
+)
+@click.option(
+    "--conversation",
+    is_flag=True,
+    help="Show conversation diff",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+@pass_context
+def checkpoint_diff(
+    ctx: CLIContext,
+    checkpoint_a: str,
+    checkpoint_b: str,
+    session_id: str | None,
+    file_path: str | None,
+    conversation: bool,
+    as_json: bool,
+) -> None:
+    """Compare two checkpoints.
+
+    Implements [SPEC-07.41].
+
+    Example:
+        parhelia checkpoint diff cp-abc123 cp-def456
+        parhelia checkpoint diff cp-a cp-b --file src/auth.py
+        parhelia checkpoint diff cp-a cp-b --conversation
+    """
+    from parhelia.checkpoint_diff import CheckpointDiffer
+
+    async def _diff():
+        # Find checkpoints
+        cp_a = None
+        cp_b = None
+
+        if session_id:
+            checkpoints = await ctx.checkpoint_manager.list_checkpoints(session_id)
+            for cp in checkpoints:
+                if cp.id == checkpoint_a:
+                    cp_a = cp
+                if cp.id == checkpoint_b:
+                    cp_b = cp
+        else:
+            checkpoint_root = ctx.checkpoint_manager.checkpoint_root
+            if checkpoint_root.exists():
+                for sess_dir in checkpoint_root.iterdir():
+                    if sess_dir.is_dir():
+                        checkpoints = await ctx.checkpoint_manager.list_checkpoints(
+                            sess_dir.name
+                        )
+                        for cp in checkpoints:
+                            if cp.id == checkpoint_a:
+                                cp_a = cp
+                            if cp.id == checkpoint_b:
+                                cp_b = cp
+                        if cp_a and cp_b:
+                            break
+
+        return cp_a, cp_b
+
+    cp_a, cp_b = asyncio.run(_diff())
+
+    if not cp_a:
+        click.secho(f"Checkpoint not found: {checkpoint_a}", fg="red")
+        sys.exit(1)
+
+    if not cp_b:
+        click.secho(f"Checkpoint not found: {checkpoint_b}", fg="red")
+        sys.exit(1)
+
+    differ = CheckpointDiffer()
+
+    if file_path:
+        # File-specific diff
+        # Would need to read file contents from checkpoint archives
+        click.echo(f"File Diff: {file_path}")
+        click.echo(f"Checkpoints: {checkpoint_a} → {checkpoint_b}")
+        click.echo()
+        click.secho(
+            "Note: File diff requires checkpoint archive access (not yet implemented)",
+            fg="yellow",
+        )
+    elif conversation:
+        # Conversation diff
+        # Would need conversation data from checkpoints
+        click.echo(f"Conversation Diff: {checkpoint_a} → {checkpoint_b}")
+        click.echo()
+        click.secho(
+            "Note: Conversation diff requires checkpoint conversation data",
+            fg="yellow",
+        )
+    else:
+        # Overview comparison
+        comparison = differ.compare(cp_a, cp_b)
+
+        if as_json:
+            click.echo(json.dumps(comparison.to_dict(), indent=2, default=str))
+        else:
+            click.echo(differ.format_comparison(comparison))
+
+
+@checkpoint.command("list")
+@click.option(
+    "--session",
+    "session_id",
+    help="Filter by session ID",
+)
+@click.option(
+    "--limit",
+    default=20,
+    help="Maximum checkpoints to show",
+)
+@pass_context
+def checkpoint_list(ctx: CLIContext, session_id: str | None, limit: int) -> None:
+    """List checkpoints."""
+
+    async def _list():
+        all_checkpoints = []
+
+        checkpoint_root = ctx.checkpoint_manager.checkpoint_root
+        if not checkpoint_root.exists():
+            return []
+
+        if session_id:
+            checkpoints = await ctx.checkpoint_manager.list_checkpoints(session_id)
+            all_checkpoints.extend(checkpoints)
+        else:
+            for sess_dir in checkpoint_root.iterdir():
+                if sess_dir.is_dir():
+                    checkpoints = await ctx.checkpoint_manager.list_checkpoints(
+                        sess_dir.name
+                    )
+                    all_checkpoints.extend(checkpoints)
+
+        return all_checkpoints
+
+    checkpoints = asyncio.run(_list())
+
+    if not checkpoints:
+        click.echo("No checkpoints found.")
+        return
+
+    # Sort by created_at
+    checkpoints.sort(key=lambda c: c.created_at, reverse=True)
+
+    click.echo(f"{'ID':<16} {'Session':<20} {'Trigger':<10} {'Created':<20}")
+    click.echo("-" * 70)
+
+    for cp in checkpoints[:limit]:
+        click.echo(
+            f"{cp.id:<16} {cp.session_id:<20} {cp.trigger.value:<10} "
+            f"{cp.created_at.strftime('%Y-%m-%d %H:%M'):<20}"
+        )
+
+
+# =============================================================================
+# Session Recover Command [SPEC-07.42]
+# =============================================================================
+
+
+@session.command("recover")
+@click.argument("session_id")
+@click.option(
+    "--from",
+    "from_checkpoint",
+    help="Specific checkpoint to recover from",
+)
+@click.option(
+    "--action",
+    type=click.Choice(["resume", "new", "wait"]),
+    help="Recovery action (skip interactive selection)",
+)
+@pass_context
+def session_recover(
+    ctx: CLIContext,
+    session_id: str,
+    from_checkpoint: str | None,
+    action: str | None,
+) -> None:
+    """Interactive recovery wizard for a session.
+
+    Implements [SPEC-07.42].
+
+    Handles common recovery scenarios:
+    - Resume from failure (crash, timeout)
+    - Resume after rejection
+    - Manual checkpoint selection
+
+    Example:
+        parhelia session recover my-session
+        parhelia session recover my-session --from cp-abc123
+        parhelia session recover my-session --action resume
+    """
+    from parhelia.recovery import RecoveryAction, RecoveryManager
+
+    async def _recover():
+        manager = RecoveryManager(
+            checkpoint_manager=ctx.checkpoint_manager,
+        )
+
+        # Get recovery plan
+        if from_checkpoint:
+            plan = await manager.plan_manual_recovery(
+                session_id=session_id,
+                from_checkpoint_id=from_checkpoint,
+            )
+        else:
+            plan = await manager.plan_failure_recovery(session_id=session_id)
+
+        if not plan:
+            click.secho(f"No recovery options found for session: {session_id}", fg="red")
+            return
+
+        # Display plan
+        click.echo(manager.format_recovery_plan(plan))
+        click.echo()
+
+        # Determine action
+        if action:
+            action_map = {
+                "resume": RecoveryAction.RESUME,
+                "new": RecoveryAction.NEW_SESSION,
+                "wait": RecoveryAction.WAIT_FOR_USER,
+            }
+            selected_action = action_map.get(action)
+        else:
+            # Interactive selection
+            click.echo("Available actions:")
+            for i, opt in enumerate(plan.options, 1):
+                click.echo(f"  [{i}] {opt.action.value}: {opt.description}")
+            click.echo()
+
+            choice = click.prompt(
+                "Select action",
+                type=int,
+                default=1,
+            )
+
+            if 1 <= choice <= len(plan.options):
+                selected_action = plan.options[choice - 1].action
+            else:
+                click.secho("Invalid selection", fg="red")
+                return
+
+        # Execute recovery
+        result = await manager.execute_failure_recovery(plan, selected_action)
+
+        click.echo()
+        click.echo(manager.format_recovery_result(result))
+
+        if not result.success:
+            sys.exit(1)
+
+    asyncio.run(_recover())
 
 
 # =============================================================================
