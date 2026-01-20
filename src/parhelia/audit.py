@@ -53,6 +53,8 @@ class AuditLogger:
         "network.egress_blocked",
         "checkpoint.create",
         "checkpoint.restore",
+        "checkpoint.approve",  # [SPEC-07.20.04]
+        "checkpoint.reject",  # [SPEC-07.20.04]
     ]
 
     # Keys containing these substrings will be redacted

@@ -580,6 +580,192 @@ def config(ctx: CLIContext, as_json: bool) -> None:
 
 
 # =============================================================================
+# Session Command Group
+# =============================================================================
+
+
+@cli.group()
+def session() -> None:
+    """Session management commands.
+
+    Implements [SPEC-07.20].
+    """
+    pass
+
+
+@session.command("review")
+@click.argument("session_id")
+@click.option(
+    "--approve",
+    "action",
+    flag_value="approve",
+    help="Approve the checkpoint",
+)
+@click.option(
+    "--reject",
+    "action",
+    flag_value="reject",
+    help="Reject the checkpoint",
+)
+@click.option(
+    "--reason",
+    help="Reason for approval/rejection",
+)
+@click.option(
+    "--user",
+    default="cli-user",
+    help="Username for audit",
+)
+@pass_context
+def session_review(
+    ctx: CLIContext,
+    session_id: str,
+    action: str | None,
+    reason: str | None,
+    user: str,
+) -> None:
+    """Review a session's latest checkpoint for approval.
+
+    Implements [SPEC-07.20.03].
+
+    Example:
+        parhelia session review my-session
+        parhelia session review my-session --approve --reason "Looks good"
+        parhelia session review my-session --reject --reason "Needs more tests"
+    """
+    from parhelia.approval import ApprovalConfig, ApprovalManager
+    from parhelia.session import ApprovalStatus
+
+    async def _review():
+        # Get latest checkpoint for session
+        checkpoints = await ctx.checkpoint_manager.list_checkpoints(session_id)
+        if not checkpoints:
+            click.secho(f"No checkpoints found for session: {session_id}", fg="red")
+            return
+
+        # Sort by created_at and get latest
+        checkpoints.sort(key=lambda c: c.created_at, reverse=True)
+        checkpoint = checkpoints[0]
+
+        # Initialize approval manager
+        approval_config = ctx.config.approval or ApprovalConfig.default()
+        manager = ApprovalManager(config=approval_config)
+
+        # If action specified, perform it
+        if action == "approve":
+            approval = await manager.approve(checkpoint, user=user, reason=reason)
+            checkpoint.approval = approval
+            # TODO: Save checkpoint with updated approval
+            click.secho(f"Checkpoint {checkpoint.id} approved", fg="green")
+            return
+
+        if action == "reject":
+            if not reason:
+                click.secho("Rejection requires --reason", fg="red")
+                return
+            approval = await manager.reject(checkpoint, user=user, reason=reason)
+            checkpoint.approval = approval
+            # TODO: Save checkpoint with updated approval
+            click.secho(f"Checkpoint {checkpoint.id} rejected", fg="red")
+            return
+
+        # Display review interface
+        click.echo(f"\nSession: {session_id}")
+        if checkpoint.approval:
+            status = checkpoint.approval.status.value
+        else:
+            status = "pending"
+        click.echo(f"Status: {status}")
+        click.echo()
+
+        click.echo(f"Latest Checkpoint: {checkpoint.id}")
+        click.echo(f"  Trigger: {checkpoint.trigger.value}")
+        click.echo(f"  Created: {checkpoint.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo()
+
+        click.echo("Summary:")
+        click.echo(f"  Tokens used: {checkpoint.tokens_used:,}")
+        click.echo(f"  Estimated cost: ${checkpoint.cost_estimate:.2f}")
+        if checkpoint.uncommitted_changes:
+            click.echo(f"  Files modified: {len(checkpoint.uncommitted_changes)}")
+            for f in checkpoint.uncommitted_changes[:5]:
+                click.echo(f"    - {f}")
+            if len(checkpoint.uncommitted_changes) > 5:
+                click.echo(f"    ... and {len(checkpoint.uncommitted_changes) - 5} more")
+        click.echo()
+
+        # Show approval status
+        if checkpoint.approval:
+            click.echo("Approval:")
+            click.echo(f"  Status: {checkpoint.approval.status.value}")
+            if checkpoint.approval.user:
+                click.echo(f"  User: {checkpoint.approval.user}")
+            if checkpoint.approval.timestamp:
+                click.echo(f"  Time: {checkpoint.approval.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            if checkpoint.approval.reason:
+                click.echo(f"  Reason: {checkpoint.approval.reason}")
+            if checkpoint.approval.policy:
+                click.echo(f"  Policy: {checkpoint.approval.policy}")
+
+        click.echo()
+        click.echo("Actions:")
+        click.echo("  parhelia session review {session_id} --approve --reason '...'")
+        click.echo("  parhelia session review {session_id} --reject --reason '...'")
+
+    asyncio.run(_review())
+
+
+@session.command("pending")
+@click.option(
+    "--limit",
+    default=20,
+    help="Maximum number of checkpoints to show",
+)
+@pass_context
+def session_pending(ctx: CLIContext, limit: int) -> None:
+    """List checkpoints awaiting review.
+
+    Implements [SPEC-07.20.03].
+    """
+    from parhelia.approval import ApprovalConfig, ApprovalManager
+    from parhelia.session import ApprovalStatus
+
+    async def _list_pending():
+        # Get all checkpoints from all sessions
+        checkpoint_root = ctx.checkpoint_manager.checkpoint_root
+        if not checkpoint_root.exists():
+            click.echo("No checkpoints found.")
+            return
+
+        pending = []
+        for session_dir in checkpoint_root.iterdir():
+            if session_dir.is_dir():
+                checkpoints = await ctx.checkpoint_manager.list_checkpoints(
+                    session_dir.name
+                )
+                for cp in checkpoints:
+                    if cp.approval is None or cp.approval.status == ApprovalStatus.PENDING:
+                        pending.append(cp)
+
+        if not pending:
+            click.echo("No pending checkpoints.")
+            return
+
+        # Sort by created_at
+        pending.sort(key=lambda c: c.created_at, reverse=True)
+
+        click.echo(f"Pending Checkpoints ({len(pending)}):")
+        click.echo("=" * 60)
+        for cp in pending[:limit]:
+            click.echo(
+                f"  {cp.id}  {cp.session_id}  {cp.trigger.value}  "
+                f"{cp.created_at.strftime('%Y-%m-%d %H:%M')}"
+            )
+
+    asyncio.run(_list_pending())
+
+
+# =============================================================================
 # Environment Command
 # =============================================================================
 

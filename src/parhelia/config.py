@@ -1,16 +1,22 @@
 """Parhelia configuration management.
 
 Loads configuration from parhelia.toml with sensible defaults.
+
+Implements:
+- [SPEC-07.20.02] Escalation Policies (approval config)
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 try:
     import tomllib as tomli  # Python 3.11+ stdlib
 except ImportError:
     import tomli  # Backport for older Python
+
+if TYPE_CHECKING:
+    from parhelia.approval import ApprovalConfig
 
 
 @dataclass
@@ -25,10 +31,22 @@ class ModalConfig:
 
 
 @dataclass
+class PathsConfig:
+    """Path configuration."""
+
+    volume_root: str = "/vol/parhelia"
+    checkpoint_root: str = "/vol/parhelia/checkpoints"
+    audit_root: str = "/vol/parhelia/audit"
+    cas_root: str | None = None  # Enable CAS mode if set
+
+
+@dataclass
 class ParheliaConfig:
     """Root configuration for Parhelia."""
 
     modal: ModalConfig = field(default_factory=ModalConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
+    approval: "ApprovalConfig | None" = None  # Lazy loaded to avoid circular import
 
 
 def load_config(config_path: Path | None = None) -> ParheliaConfig:
@@ -68,6 +86,7 @@ def _find_config_file() -> Path | None:
 def _parse_config(data: dict) -> ParheliaConfig:
     """Parse configuration dictionary into ParheliaConfig."""
     modal_data = data.get("modal", {})
+    paths_data = data.get("paths", {})
 
     modal_config = ModalConfig(
         region=modal_data.get("region", "us-east"),
@@ -77,4 +96,22 @@ def _parse_config(data: dict) -> ParheliaConfig:
         default_timeout_hours=modal_data.get("default_timeout_hours", 24),
     )
 
-    return ParheliaConfig(modal=modal_config)
+    paths_config = PathsConfig(
+        volume_root=paths_data.get("volume_root", "/vol/parhelia"),
+        checkpoint_root=paths_data.get("checkpoint_root", "/vol/parhelia/checkpoints"),
+        audit_root=paths_data.get("audit_root", "/vol/parhelia/audit"),
+        cas_root=paths_data.get("cas_root"),
+    )
+
+    # Parse approval config if present [SPEC-07.20.02]
+    approval_config = None
+    if "approval" in data:
+        from parhelia.approval import parse_approval_config
+
+        approval_config = parse_approval_config(data["approval"])
+
+    return ParheliaConfig(
+        modal=modal_config,
+        paths=paths_config,
+        approval=approval_config,
+    )
