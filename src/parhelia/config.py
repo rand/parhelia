@@ -4,6 +4,7 @@ Loads configuration from parhelia.toml with sensible defaults.
 
 Implements:
 - [SPEC-07.20.02] Escalation Policies (approval config)
+- [SPEC-07.21] Notification Service (notification config)
 """
 
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from parhelia.approval import ApprovalConfig
+    from parhelia.notification import NotificationConfig
 
 
 @dataclass
@@ -47,6 +49,7 @@ class ParheliaConfig:
     modal: ModalConfig = field(default_factory=ModalConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     approval: "ApprovalConfig | None" = None  # Lazy loaded to avoid circular import
+    notifications: "NotificationConfig | None" = None  # [SPEC-07.21]
 
 
 def load_config(config_path: Path | None = None) -> ParheliaConfig:
@@ -110,8 +113,16 @@ def _parse_config(data: dict) -> ParheliaConfig:
 
         approval_config = parse_approval_config(data["approval"])
 
+    # Parse notification config if present [SPEC-07.21]
+    notification_config = None
+    if "notifications" in data:
+        from parhelia.notification import parse_notification_config
+
+        notification_config = parse_notification_config(data["notifications"])
+
     return ParheliaConfig(
         modal=modal_config,
         paths=paths_config,
         approval=approval_config,
+        notifications=notification_config,
     )
