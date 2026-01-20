@@ -687,3 +687,262 @@ class TestActionCache:
         """@trace SPEC-08.15 - is_cacheable MUST return False for non-deterministic commands."""
         assert action_cache.is_cacheable(["curl", "https://example.com"]) is False
         assert action_cache.is_cacheable(["echo", "hello"]) is False
+
+
+# =============================================================================
+# CAS Garbage Collection Tests
+# =============================================================================
+
+
+class TestGCConfig:
+    """Tests for GCConfig dataclass."""
+
+    def test_default_config(self):
+        """GCConfig MUST have sensible defaults."""
+        from parhelia.cas import GCConfig
+
+        config = GCConfig()
+
+        assert config.max_size_bytes == 10 * 1024 * 1024 * 1024  # 10 GB
+        assert config.target_size_bytes == 8 * 1024 * 1024 * 1024  # 8 GB
+        assert config.min_blob_age_seconds == 3600  # 1 hour
+        assert config.dry_run is False
+
+    def test_custom_config(self):
+        """GCConfig MUST accept custom values."""
+        from parhelia.cas import GCConfig
+
+        config = GCConfig(
+            max_size_bytes=1000,
+            target_size_bytes=500,
+            min_blob_age_seconds=60,
+            dry_run=True,
+        )
+
+        assert config.max_size_bytes == 1000
+        assert config.target_size_bytes == 500
+        assert config.dry_run is True
+
+
+class TestGCResult:
+    """Tests for GCResult dataclass."""
+
+    def test_default_result(self):
+        """GCResult MUST have zero defaults."""
+        from parhelia.cas import GCResult
+
+        result = GCResult()
+
+        assert result.blobs_deleted == 0
+        assert result.bytes_freed == 0
+        assert result.blobs_retained == 0
+        assert result.errors == []
+
+    def test_to_dict(self):
+        """GCResult MUST serialize to dict."""
+        from parhelia.cas import GCResult
+
+        result = GCResult(
+            blobs_deleted=10,
+            bytes_freed=1024,
+            blobs_retained=5,
+            bytes_retained=512,
+            errors=["error1"],
+            dry_run=True,
+        )
+
+        data = result.to_dict()
+
+        assert data["blobs_deleted"] == 10
+        assert data["bytes_freed"] == 1024
+        assert data["dry_run"] is True
+
+
+class TestCASGarbageCollector:
+    """Tests for CASGarbageCollector."""
+
+    @pytest.fixture
+    def temp_cas(self, tmp_path):
+        """Create CAS in temp directory."""
+        from parhelia.cas import ContentAddressableStorage
+
+        return ContentAddressableStorage(str(tmp_path / "cas"))
+
+    @pytest.fixture
+    def gc(self, temp_cas):
+        """Create garbage collector."""
+        from parhelia.cas import CASGarbageCollector, GCConfig
+
+        config = GCConfig(
+            max_size_bytes=1000,
+            target_size_bytes=500,
+            min_blob_age_seconds=0,  # No age restriction for tests
+        )
+        return CASGarbageCollector(temp_cas, config)
+
+    @pytest.mark.asyncio
+    async def test_get_storage_stats_empty(self, gc):
+        """get_storage_stats MUST return zeros for empty CAS."""
+        total_bytes, blob_count = await gc.get_storage_stats()
+
+        assert total_bytes == 0
+        assert blob_count == 0
+
+    @pytest.mark.asyncio
+    async def test_get_storage_stats_with_blobs(self, gc, temp_cas):
+        """get_storage_stats MUST count blobs correctly."""
+        # Write some blobs
+        await temp_cas.write_blob(b"blob1" * 10)
+        await temp_cas.write_blob(b"blob2" * 20)
+        await temp_cas.write_blob(b"blob3" * 30)
+
+        total_bytes, blob_count = await gc.get_storage_stats()
+
+        assert blob_count == 3
+        assert total_bytes == 50 + 100 + 150  # 5*10 + 5*20 + 5*30
+
+    @pytest.mark.asyncio
+    async def test_list_blobs(self, gc, temp_cas):
+        """list_blobs MUST return all blobs with metadata."""
+        d1 = await temp_cas.write_blob(b"content1")
+        d2 = await temp_cas.write_blob(b"content2")
+
+        blobs = await gc.list_blobs()
+
+        assert len(blobs) == 2
+        hashes = {b.digest.hash for b in blobs}
+        assert d1.hash in hashes
+        assert d2.hash in hashes
+
+    @pytest.mark.asyncio
+    async def test_should_run_gc_below_threshold(self, gc, temp_cas):
+        """should_run_gc MUST return False when below threshold."""
+        # Write small blob (well under 1000 byte threshold)
+        await temp_cas.write_blob(b"small")
+
+        assert await gc.should_run_gc() is False
+
+    @pytest.mark.asyncio
+    async def test_should_run_gc_above_threshold(self, gc, temp_cas):
+        """should_run_gc MUST return True when above threshold."""
+        # Write enough data to exceed 1000 byte threshold
+        for i in range(20):
+            await temp_cas.write_blob(f"large content {i}".encode() * 10)
+
+        assert await gc.should_run_gc() is True
+
+    @pytest.mark.asyncio
+    async def test_run_gc_deletes_unreferenced_blobs(self, gc, temp_cas):
+        """run_gc MUST delete unreferenced blobs."""
+        # Write enough data to trigger GC
+        for i in range(20):
+            await temp_cas.write_blob(f"content {i}".encode() * 10)
+
+        # Run GC
+        result = await gc.run_gc()
+
+        assert result.blobs_deleted > 0
+        assert result.bytes_freed > 0
+
+    @pytest.mark.asyncio
+    async def test_run_gc_retains_referenced_blobs(self, gc, temp_cas):
+        """run_gc MUST retain blobs reachable from reference roots."""
+        # Write a blob and mark it as referenced
+        protected = await temp_cas.write_blob(b"protected content" * 100)
+        gc.add_reference_root(protected.hash)
+
+        # Write unreferenced blobs to trigger GC
+        for i in range(20):
+            await temp_cas.write_blob(f"content {i}".encode() * 10)
+
+        # Run GC
+        result = await gc.run_gc()
+
+        # Protected blob should still exist
+        assert await temp_cas.contains(protected)
+
+    @pytest.mark.asyncio
+    async def test_run_gc_dry_run(self, gc, temp_cas):
+        """run_gc MUST not delete blobs in dry_run mode."""
+        gc.config.dry_run = True
+
+        # Write blobs
+        for i in range(20):
+            await temp_cas.write_blob(f"content {i}".encode() * 10)
+
+        initial_bytes, initial_count = await gc.get_storage_stats()
+
+        # Run GC in dry run mode
+        result = await gc.run_gc()
+
+        assert result.dry_run is True
+        assert result.blobs_deleted > 0  # Would have deleted
+
+        # But blobs should still exist
+        final_bytes, final_count = await gc.get_storage_stats()
+        assert final_count == initial_count
+
+    @pytest.mark.asyncio
+    async def test_add_remove_reference_root(self, gc):
+        """add/remove_reference_root MUST manage protected roots."""
+        gc.add_reference_root("abc123")
+        gc.add_reference_root("def456")
+
+        assert "abc123" in gc._reference_roots
+        assert "def456" in gc._reference_roots
+
+        gc.remove_reference_root("abc123")
+
+        assert "abc123" not in gc._reference_roots
+        assert "def456" in gc._reference_roots
+
+    @pytest.mark.asyncio
+    async def test_collect_referenced_digests(self, gc, temp_cas):
+        """collect_referenced_digests MUST traverse tree."""
+        from parhelia.cas import Digest, Directory, DirectoryNode, FileNode
+
+        # Create a simple tree: root -> file
+        file_content = b"file content"
+        file_digest = await temp_cas.write_blob(file_content)
+
+        directory = Directory(
+            files=[FileNode(name="test.txt", digest=file_digest, is_executable=False)],
+            directories=[],
+            symlinks=[],
+        )
+        dir_content = directory.serialize()
+        root_digest = await temp_cas.write_blob(dir_content)
+
+        # Add root as reference
+        gc.add_reference_root(root_digest.hash)
+
+        # Collect referenced digests
+        referenced = await gc.collect_referenced_digests()
+
+        # Both root and file should be referenced
+        assert root_digest.hash in referenced
+        assert file_digest.hash in referenced
+
+    def test_format_gc_result(self, gc):
+        """format_gc_result MUST produce readable output."""
+        from parhelia.cas import GCResult
+
+        result = GCResult(
+            blobs_deleted=100,
+            bytes_freed=1024 * 1024,
+            blobs_retained=50,
+            bytes_retained=512 * 1024,
+        )
+
+        output = gc.format_gc_result(result)
+
+        assert "100" in output  # blobs deleted
+        assert "50" in output  # blobs retained
+        assert "MB" in output or "KB" in output  # formatted bytes
+
+    def test_format_bytes(self, gc):
+        """_format_bytes MUST produce human-readable sizes."""
+        assert "B" in gc._format_bytes(500)
+        assert "KB" in gc._format_bytes(1024)
+        assert "MB" in gc._format_bytes(1024 * 1024)
+        assert "GB" in gc._format_bytes(1024 * 1024 * 1024)
