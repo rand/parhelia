@@ -3,6 +3,7 @@
 @trace SPEC-03.11 - Conversation State Capture
 @trace SPEC-03.12 - Checkpoint Triggers
 @trace SPEC-03.13 - Workspace Snapshot
+@trace SPEC-07.11 - Checkpoint Metadata Schema v1.2
 """
 
 import json
@@ -496,3 +497,218 @@ class TestCASIntegratedCheckpoint:
         assert (restore_dir / "main.py").exists()
         assert not (restore_dir / "node_modules").exists()
         assert not (restore_dir / "__pycache__").exists()
+
+
+class TestCheckpointMetadataSchemaV12:
+    """Tests for checkpoint metadata schema v1.2 - SPEC-07.11."""
+
+    def test_approval_status_enum(self):
+        """@trace SPEC-07.11.03 - ApprovalStatus MUST have four states."""
+        from parhelia.session import ApprovalStatus
+
+        assert ApprovalStatus.PENDING.value == "pending"
+        assert ApprovalStatus.APPROVED.value == "approved"
+        assert ApprovalStatus.REJECTED.value == "rejected"
+        assert ApprovalStatus.AUTO_APPROVED.value == "auto_approved"
+
+    def test_checkpoint_approval_creation(self):
+        """@trace SPEC-07.11.03 - CheckpointApproval MUST store approval data."""
+        from parhelia.session import ApprovalStatus, CheckpointApproval
+
+        approval = CheckpointApproval(
+            status=ApprovalStatus.APPROVED,
+            user="test-user",
+            timestamp=datetime(2026, 1, 20, 12, 0, 0),
+            reason="Looks good",
+            policy="auto",
+        )
+
+        assert approval.status == ApprovalStatus.APPROVED
+        assert approval.user == "test-user"
+        assert approval.reason == "Looks good"
+        assert approval.policy == "auto"
+
+    def test_checkpoint_approval_serialization(self):
+        """@trace SPEC-07.11.03 - CheckpointApproval MUST serialize/deserialize."""
+        from parhelia.session import ApprovalStatus, CheckpointApproval
+
+        original = CheckpointApproval(
+            status=ApprovalStatus.REJECTED,
+            user="reviewer",
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            reason="Needs more tests",
+            policy="strict",
+        )
+
+        data = original.to_dict()
+        restored = CheckpointApproval.from_dict(data)
+
+        assert restored.status == original.status
+        assert restored.user == original.user
+        assert restored.timestamp == original.timestamp
+        assert restored.reason == original.reason
+        assert restored.policy == original.policy
+
+    def test_checkpoint_annotation_creation(self):
+        """@trace SPEC-07.11.05 - CheckpointAnnotation MUST store annotation data."""
+        from parhelia.session import CheckpointAnnotation
+
+        annotation = CheckpointAnnotation(
+            timestamp=datetime(2026, 1, 20, 15, 0, 0),
+            user="developer",
+            text="This checkpoint includes the auth fix",
+        )
+
+        assert annotation.user == "developer"
+        assert annotation.text == "This checkpoint includes the auth fix"
+
+    def test_checkpoint_annotation_serialization(self):
+        """@trace SPEC-07.11.05 - CheckpointAnnotation MUST serialize/deserialize."""
+        from parhelia.session import CheckpointAnnotation
+
+        original = CheckpointAnnotation(
+            timestamp=datetime(2026, 1, 20, 15, 0, 0),
+            user="developer",
+            text="Important milestone reached",
+        )
+
+        data = original.to_dict()
+        restored = CheckpointAnnotation.from_dict(data)
+
+        assert restored.timestamp == original.timestamp
+        assert restored.user == original.user
+        assert restored.text == original.text
+
+    def test_linked_issue_creation(self):
+        """@trace SPEC-07.11.05 - LinkedIssue MUST store issue reference."""
+        from parhelia.session import LinkedIssue
+
+        issue = LinkedIssue(
+            tracker="github",
+            id="123",
+            url="https://github.com/org/repo/issues/123",
+        )
+
+        assert issue.tracker == "github"
+        assert issue.id == "123"
+        assert issue.url == "https://github.com/org/repo/issues/123"
+
+    def test_linked_issue_serialization(self):
+        """@trace SPEC-07.11.05 - LinkedIssue MUST serialize/deserialize."""
+        from parhelia.session import LinkedIssue
+
+        original = LinkedIssue(
+            tracker="beads",
+            id="ph-abc",
+            url=None,
+        )
+
+        data = original.to_dict()
+        restored = LinkedIssue.from_dict(data)
+
+        assert restored.tracker == original.tracker
+        assert restored.id == original.id
+        assert restored.url == original.url
+
+    def test_checkpoint_provenance_fields(self):
+        """@trace SPEC-07.11.02 - Checkpoint MUST have provenance fields."""
+        from parhelia.session import Checkpoint, CheckpointTrigger
+
+        checkpoint = Checkpoint(
+            id="cp-test123",
+            session_id="session-456",
+            trigger=CheckpointTrigger.MANUAL,
+            working_directory="/tmp/workspace",
+            parent_checkpoint_id="cp-parent789",
+            checkpoint_chain_depth=5,
+        )
+
+        assert checkpoint.parent_checkpoint_id == "cp-parent789"
+        assert checkpoint.checkpoint_chain_depth == 5
+
+    def test_checkpoint_provenance_defaults(self):
+        """@trace SPEC-07.11.02 - Provenance fields MUST have sensible defaults."""
+        from parhelia.session import Checkpoint, CheckpointTrigger
+
+        checkpoint = Checkpoint(
+            id="cp-first",
+            session_id="session-new",
+            trigger=CheckpointTrigger.MANUAL,
+            working_directory="/tmp/workspace",
+        )
+
+        assert checkpoint.parent_checkpoint_id is None
+        assert checkpoint.checkpoint_chain_depth == 1
+
+    def test_checkpoint_approval_field(self):
+        """@trace SPEC-07.11.03 - Checkpoint MUST support approval field."""
+        from parhelia.session import (
+            ApprovalStatus,
+            Checkpoint,
+            CheckpointApproval,
+            CheckpointTrigger,
+        )
+
+        approval = CheckpointApproval(
+            status=ApprovalStatus.AUTO_APPROVED,
+            policy="auto",
+        )
+
+        checkpoint = Checkpoint(
+            id="cp-approved",
+            session_id="session-123",
+            trigger=CheckpointTrigger.COMPLETE,
+            working_directory="/tmp/workspace",
+            approval=approval,
+        )
+
+        assert checkpoint.approval is not None
+        assert checkpoint.approval.status == ApprovalStatus.AUTO_APPROVED
+
+    def test_checkpoint_annotation_fields(self):
+        """@trace SPEC-07.11.05 - Checkpoint MUST support annotation fields."""
+        from parhelia.session import (
+            Checkpoint,
+            CheckpointAnnotation,
+            CheckpointTrigger,
+            LinkedIssue,
+        )
+
+        checkpoint = Checkpoint(
+            id="cp-annotated",
+            session_id="session-123",
+            trigger=CheckpointTrigger.MANUAL,
+            working_directory="/tmp/workspace",
+            tags=["milestone/v1.0", "stable"],
+            annotations=[
+                CheckpointAnnotation(
+                    timestamp=datetime(2026, 1, 20, 12, 0, 0),
+                    user="dev",
+                    text="Release candidate",
+                )
+            ],
+            linked_issues=[
+                LinkedIssue(tracker="github", id="42", url="https://github.com/org/repo/issues/42")
+            ],
+        )
+
+        assert checkpoint.tags == ["milestone/v1.0", "stable"]
+        assert len(checkpoint.annotations) == 1
+        assert checkpoint.annotations[0].text == "Release candidate"
+        assert len(checkpoint.linked_issues) == 1
+        assert checkpoint.linked_issues[0].id == "42"
+
+    def test_checkpoint_annotation_defaults(self):
+        """@trace SPEC-07.11.05 - Annotation fields MUST default to empty lists."""
+        from parhelia.session import Checkpoint, CheckpointTrigger
+
+        checkpoint = Checkpoint(
+            id="cp-plain",
+            session_id="session-123",
+            trigger=CheckpointTrigger.PERIODIC,
+            working_directory="/tmp/workspace",
+        )
+
+        assert checkpoint.tags == []
+        assert checkpoint.annotations == []
+        assert checkpoint.linked_issues == []

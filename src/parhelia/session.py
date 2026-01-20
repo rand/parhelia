@@ -3,6 +3,7 @@
 Implements:
 - [SPEC-03.10] Checkpoint State Schema
 - [SPEC-03.11] Conversation State Capture
+- [SPEC-07.11] Checkpoint Metadata Schema v1.2
 """
 
 from __future__ import annotations
@@ -42,6 +43,111 @@ class CheckpointTrigger(Enum):
     COMPLETE = "complete"  # Task completed
     SHUTDOWN = "shutdown"  # Container shutting down
     MANUAL = "manual"  # User requested
+
+
+class ApprovalStatus(Enum):
+    """Checkpoint approval state.
+
+    Implements [SPEC-07.11.03].
+    """
+
+    PENDING = "pending"  # Awaiting human review
+    APPROVED = "approved"  # Human approved
+    REJECTED = "rejected"  # Human rejected
+    AUTO_APPROVED = "auto_approved"  # Policy auto-approved
+
+
+@dataclass
+class CheckpointApproval:
+    """Approval decision for a checkpoint.
+
+    Implements [SPEC-07.11.03].
+    """
+
+    status: ApprovalStatus
+    user: str | None = None  # Username who approved/rejected
+    timestamp: datetime | None = None  # When decision was made
+    reason: str | None = None  # Free-text explanation
+    policy: str | None = None  # Which escalation policy was applied
+
+    def to_dict(self) -> dict:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            "status": self.status.value,
+            "user": self.user,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "reason": self.reason,
+            "policy": self.policy,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CheckpointApproval":
+        """Create from dictionary."""
+        return cls(
+            status=ApprovalStatus(data["status"]),
+            user=data.get("user"),
+            timestamp=datetime.fromisoformat(data["timestamp"]) if data.get("timestamp") else None,
+            reason=data.get("reason"),
+            policy=data.get("policy"),
+        )
+
+
+@dataclass
+class CheckpointAnnotation:
+    """A timestamped annotation on a checkpoint.
+
+    Implements [SPEC-07.11.05].
+    """
+
+    timestamp: datetime
+    user: str
+    text: str
+
+    def to_dict(self) -> dict:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "user": self.user,
+            "text": self.text,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CheckpointAnnotation":
+        """Create from dictionary."""
+        return cls(
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            user=data["user"],
+            text=data["text"],
+        )
+
+
+@dataclass
+class LinkedIssue:
+    """Reference to an external issue tracker.
+
+    Implements [SPEC-07.11.05].
+    """
+
+    tracker: str  # "github", "linear", "beads"
+    id: str  # Issue ID
+    url: str | None = None  # Full URL if available
+
+    def to_dict(self) -> dict:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            "tracker": self.tracker,
+            "id": self.id,
+            "url": self.url,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LinkedIssue":
+        """Create from dictionary."""
+        return cls(
+            tracker=data["tracker"],
+            id=data["id"],
+            url=data.get("url"),
+        )
 
 
 @dataclass
@@ -175,6 +281,18 @@ class Checkpoint:
 
     # Environment versioning [SPEC-07.10]
     environment_snapshot: EnvironmentSnapshot | None = None
+
+    # Provenance [SPEC-07.11.02]
+    parent_checkpoint_id: str | None = None  # Previous checkpoint in chain
+    checkpoint_chain_depth: int = 1  # Number of checkpoints in session
+
+    # Approval [SPEC-07.11.03]
+    approval: CheckpointApproval | None = None
+
+    # Annotations [SPEC-07.11.05]
+    tags: list[str] = field(default_factory=list)  # Hierarchical tags
+    annotations: list[CheckpointAnnotation] = field(default_factory=list)
+    linked_issues: list[LinkedIssue] = field(default_factory=list)
 
     # Verification
     verified: bool = False

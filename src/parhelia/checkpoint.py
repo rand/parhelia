@@ -5,6 +5,7 @@ Implements:
 - [SPEC-03.12] Checkpoint Triggers
 - [SPEC-03.13] Workspace Snapshot
 - [SPEC-07.10] Environment Versioning
+- [SPEC-07.11] Checkpoint Metadata Schema v1.2
 - [SPEC-08.14] Incremental Workspace Checkpoint (CAS integration)
 """
 
@@ -31,7 +32,14 @@ from parhelia.cas import (
     MerkleTreeDiff,
 )
 from parhelia.environment import EnvironmentCapture, EnvironmentSnapshot
-from parhelia.session import Checkpoint, CheckpointTrigger
+from parhelia.session import (
+    ApprovalStatus,
+    Checkpoint,
+    CheckpointAnnotation,
+    CheckpointApproval,
+    CheckpointTrigger,
+    LinkedIssue,
+)
 
 
 class CheckpointManager:
@@ -153,6 +161,13 @@ class CheckpointManager:
                 # Don't fail checkpoint if environment capture fails
                 pass
 
+        # Compute provenance [SPEC-07.11.02]
+        parent_checkpoint_id: str | None = None
+        checkpoint_chain_depth: int = 1
+        if previous_checkpoint:
+            parent_checkpoint_id = previous_checkpoint.id
+            checkpoint_chain_depth = previous_checkpoint.checkpoint_chain_depth + 1
+
         # Create checkpoint object
         checkpoint = Checkpoint(
             id=checkpoint_id,
@@ -164,6 +179,8 @@ class CheckpointManager:
             workspace_root=workspace_root,
             uncommitted_changes=uncommitted_changes,
             environment_snapshot=environment_snapshot,
+            parent_checkpoint_id=parent_checkpoint_id,
+            checkpoint_chain_depth=checkpoint_chain_depth,
         )
 
         # Save manifest
@@ -349,6 +366,22 @@ class CheckpointManager:
         if checkpoint.environment_snapshot:
             manifest["environment"] = checkpoint.environment_snapshot.to_dict()
 
+        # Add provenance [SPEC-07.11.02]
+        manifest["parent_checkpoint_id"] = checkpoint.parent_checkpoint_id
+        manifest["checkpoint_chain_depth"] = checkpoint.checkpoint_chain_depth
+
+        # Add approval [SPEC-07.11.03]
+        if checkpoint.approval:
+            manifest["approval"] = checkpoint.approval.to_dict()
+
+        # Add annotations [SPEC-07.11.05]
+        if checkpoint.tags:
+            manifest["tags"] = checkpoint.tags
+        if checkpoint.annotations:
+            manifest["annotations"] = [a.to_dict() for a in checkpoint.annotations]
+        if checkpoint.linked_issues:
+            manifest["linked_issues"] = [i.to_dict() for i in checkpoint.linked_issues]
+
         manifest_path = checkpoint_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -394,6 +427,20 @@ class CheckpointManager:
             if data.get("environment"):
                 environment_snapshot = EnvironmentSnapshot.from_dict(data["environment"])
 
+            # Load approval if present [SPEC-07.11.03]
+            approval = None
+            if data.get("approval"):
+                approval = CheckpointApproval.from_dict(data["approval"])
+
+            # Load annotations [SPEC-07.11.05]
+            annotations = []
+            for ann in data.get("annotations", []):
+                annotations.append(CheckpointAnnotation.from_dict(ann))
+
+            linked_issues = []
+            for issue in data.get("linked_issues", []):
+                linked_issues.append(LinkedIssue.from_dict(issue))
+
             return Checkpoint(
                 id=data["id"],
                 session_id=data["session_id"],
@@ -406,6 +453,15 @@ class CheckpointManager:
                 tokens_used=data.get("tokens_used", 0),
                 cost_estimate=data.get("cost_estimate", 0.0),
                 environment_snapshot=environment_snapshot,
+                # Provenance [SPEC-07.11.02] - defaults for v1.0/v1.1 compatibility
+                parent_checkpoint_id=data.get("parent_checkpoint_id"),
+                checkpoint_chain_depth=data.get("checkpoint_chain_depth", 1),
+                # Approval [SPEC-07.11.03]
+                approval=approval,
+                # Annotations [SPEC-07.11.05]
+                tags=data.get("tags", []),
+                annotations=annotations,
+                linked_issues=linked_issues,
             )
         except Exception:
             return None
