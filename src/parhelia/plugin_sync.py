@@ -3,15 +3,18 @@
 Implements:
 - [SPEC-07.10] Plugin Discovery
 - [SPEC-07.11] Plugin Sync Strategy
+- [SPEC-08.16] CAS Plugin Integration
 """
 
 import asyncio
-import os
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+from parhelia.cas import ContentAddressableStorage, Digest, MerkleTreeBuilder
 
 
 @dataclass
@@ -369,3 +372,322 @@ async def sync_plugins_to_volume(
 
     manager = PluginSyncManager(volume_path=volume_path)
     return await manager.sync_all(plugins)
+
+
+# =============================================================================
+# [SPEC-08.16] CAS Plugin Integration
+# =============================================================================
+
+
+@dataclass
+class PluginManifest:
+    """Manifest for a plugin stored in CAS.
+
+    Implements [SPEC-08.16].
+    """
+
+    name: str
+    version: str | None  # Git commit hash or version string
+    root_digest: Digest  # Merkle tree root
+    git_remote: str | None
+    git_branch: str | None
+    has_build_step: bool
+    dependencies: list[str]
+    file_count: int
+    total_size_bytes: int
+
+    def to_dict(self) -> dict:
+        """Serialize to dictionary."""
+        return {
+            "name": self.name,
+            "version": self.version,
+            "root_digest": {
+                "hash": self.root_digest.hash,
+                "size_bytes": self.root_digest.size_bytes,
+            },
+            "git_remote": self.git_remote,
+            "git_branch": self.git_branch,
+            "has_build_step": self.has_build_step,
+            "dependencies": self.dependencies,
+            "file_count": self.file_count,
+            "total_size_bytes": self.total_size_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PluginManifest":
+        """Deserialize from dictionary."""
+        return cls(
+            name=data["name"],
+            version=data.get("version"),
+            root_digest=Digest(
+                hash=data["root_digest"]["hash"],
+                size_bytes=data["root_digest"]["size_bytes"],
+            ),
+            git_remote=data.get("git_remote"),
+            git_branch=data.get("git_branch"),
+            has_build_step=data.get("has_build_step", False),
+            dependencies=data.get("dependencies", []),
+            file_count=data.get("file_count", 0),
+            total_size_bytes=data.get("total_size_bytes", 0),
+        )
+
+
+@dataclass
+class CASyncResult:
+    """Result of a CAS plugin sync operation."""
+
+    plugin: str
+    success: bool
+    manifest: PluginManifest | None = None
+    reason: str | None = None
+    blobs_created: int = 0
+    blobs_reused: int = 0
+
+
+class PluginCASManager:
+    """Manage plugins using Content-Addressable Storage.
+
+    Stores plugin content in CAS for deduplication across containers.
+    Implements [SPEC-08.16].
+    """
+
+    def __init__(
+        self,
+        cas: ContentAddressableStorage,
+        manifest_path: str = "/vol/parhelia/plugins/manifests",
+    ):
+        self.cas = cas
+        self.tree_builder = MerkleTreeBuilder(cas)
+        self.manifest_path = Path(manifest_path)
+
+    async def sync_plugin(self, plugin: PluginInfo) -> CASyncResult:
+        """Store plugin content in CAS.
+
+        Args:
+            plugin: Plugin info from discovery
+
+        Returns:
+            Sync result with manifest if successful
+        """
+        try:
+            source_path = Path(plugin.path)
+
+            if not source_path.exists():
+                return CASyncResult(
+                    plugin=plugin.name,
+                    success=False,
+                    reason=f"Source path does not exist: {plugin.path}",
+                )
+
+            # Get version from git if available
+            version = self._get_git_version(source_path)
+
+            # Count files and size before building tree
+            file_count = 0
+            total_size = 0
+            for f in source_path.rglob("*"):
+                if f.is_file() and not self._should_exclude(f):
+                    file_count += 1
+                    total_size += f.stat().st_size
+
+            # Build Merkle tree (this stores all blobs in CAS)
+            root_digest = await self.tree_builder.build_tree(str(source_path))
+
+            # Create manifest
+            manifest = PluginManifest(
+                name=plugin.name,
+                version=version,
+                root_digest=root_digest,
+                git_remote=plugin.git_remote,
+                git_branch=plugin.git_branch,
+                has_build_step=plugin.has_build_step,
+                dependencies=plugin.dependencies,
+                file_count=file_count,
+                total_size_bytes=total_size,
+            )
+
+            # Store manifest
+            await self._store_manifest(manifest)
+
+            return CASyncResult(
+                plugin=plugin.name,
+                success=True,
+                manifest=manifest,
+            )
+
+        except Exception as e:
+            return CASyncResult(
+                plugin=plugin.name,
+                success=False,
+                reason=str(e),
+            )
+
+    async def materialize_plugin(
+        self,
+        plugin_name: str,
+        target_dir: str,
+    ) -> bool:
+        """Restore plugin from CAS to filesystem.
+
+        Args:
+            plugin_name: Name of the plugin to restore
+            target_dir: Directory to restore plugin to
+
+        Returns:
+            True if successful
+        """
+        manifest = await self._load_manifest(plugin_name)
+        if not manifest:
+            return False
+
+        target_path = Path(target_dir) / plugin_name
+        target_path.mkdir(parents=True, exist_ok=True)
+
+        # Restore from CAS
+        await self._restore_tree(manifest.root_digest, target_path)
+        return True
+
+    async def get_manifest(self, plugin_name: str) -> PluginManifest | None:
+        """Get manifest for a plugin."""
+        return await self._load_manifest(plugin_name)
+
+    async def list_plugins(self) -> list[PluginManifest]:
+        """List all plugins stored in CAS."""
+        manifests = []
+
+        if not self.manifest_path.exists():
+            return manifests
+
+        for manifest_file in self.manifest_path.glob("*.json"):
+            try:
+                manifest = await self._load_manifest(manifest_file.stem)
+                if manifest:
+                    manifests.append(manifest)
+            except Exception:
+                continue
+
+        return manifests
+
+    async def plugin_exists(self, plugin_name: str, version: str | None = None) -> bool:
+        """Check if plugin exists in CAS.
+
+        Args:
+            plugin_name: Name of the plugin
+            version: Optional version to check for
+
+        Returns:
+            True if plugin (and optionally version) exists
+        """
+        manifest = await self._load_manifest(plugin_name)
+        if not manifest:
+            return False
+
+        if version and manifest.version != version:
+            return False
+
+        # Verify root digest exists in CAS
+        return await self.cas.contains(manifest.root_digest)
+
+    async def _store_manifest(self, manifest: PluginManifest) -> None:
+        """Store plugin manifest."""
+        self.manifest_path.mkdir(parents=True, exist_ok=True)
+        manifest_file = self.manifest_path / f"{manifest.name}.json"
+
+        with open(manifest_file, "w") as f:
+            json.dump(manifest.to_dict(), f, indent=2)
+
+    async def _load_manifest(self, plugin_name: str) -> PluginManifest | None:
+        """Load plugin manifest."""
+        manifest_file = self.manifest_path / f"{plugin_name}.json"
+
+        if not manifest_file.exists():
+            return None
+
+        with open(manifest_file, "r") as f:
+            data = json.load(f)
+
+        return PluginManifest.from_dict(data)
+
+    async def _restore_tree(self, root_digest: Digest, target_path: Path) -> None:
+        """Restore directory tree from CAS."""
+        from parhelia.cas import Directory
+
+        content = await self.cas.read_blob(root_digest)
+        directory = Directory.deserialize(content)
+
+        # Restore files
+        for f in directory.files:
+            file_path = target_path / f.name
+            file_content = await self.cas.read_blob(f.digest)
+            file_path.write_bytes(file_content)
+            if f.is_executable:
+                file_path.chmod(0o755)
+
+        # Restore symlinks
+        for s in directory.symlinks:
+            link_path = target_path / s.name
+            if link_path.exists() or link_path.is_symlink():
+                link_path.unlink()
+            link_path.symlink_to(s.target)
+
+        # Restore subdirectories
+        for d in directory.directories:
+            subdir_path = target_path / d.name
+            subdir_path.mkdir(exist_ok=True)
+            await self._restore_tree(d.digest, subdir_path)
+
+    def _get_git_version(self, path: Path) -> str | None:
+        """Get git commit hash as version."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()[:12]  # Short hash
+        except Exception:
+            pass
+        return None
+
+    def _should_exclude(self, path: Path) -> bool:
+        """Check if path should be excluded from sync."""
+        exclude_patterns = {
+            "node_modules",
+            "__pycache__",
+            ".git",
+            ".venv",
+            "venv",
+            ".mypy_cache",
+            ".pytest_cache",
+        }
+        return any(part in exclude_patterns for part in path.parts)
+
+
+async def sync_plugins_to_cas(
+    claude_dir: str = "~/.claude",
+    cas_root: str = "/vol/parhelia/cas",
+) -> list[CASyncResult]:
+    """Convenience function to discover and sync all plugins to CAS.
+
+    Args:
+        claude_dir: Path to local Claude configuration
+        cas_root: Path to CAS root directory
+
+    Returns:
+        List of sync results for each plugin
+    """
+    discovery = PluginDiscovery(claude_dir=claude_dir)
+    plugins = await discovery.discover_all()
+
+    cas = ContentAddressableStorage(root_path=cas_root)
+    manager = PluginCASManager(cas=cas)
+
+    results = []
+    for plugin in plugins:
+        result = await manager.sync_plugin(plugin)
+        results.append(result)
+
+    return results
