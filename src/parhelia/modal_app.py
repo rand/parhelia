@@ -106,7 +106,12 @@ cpu_image = (
         "chmod +x /entrypoint.sh",
     ])
     # Add parhelia package source for remote functions
-    .add_local_python_source("parhelia")
+    # Use add_local_dir for src/ layout compatibility
+    .add_local_dir(str(_PACKAGE_DIR), "/root/parhelia", copy=True)
+    .run_commands([
+        "echo 'export PYTHONPATH=/root:$PYTHONPATH' >> ~/.bashrc",
+    ])
+    .env({"PYTHONPATH": "/root"})
 )
 
 # GPU image extends CPU with CUDA support
@@ -121,7 +126,10 @@ gpu_image = cpu_image.run_commands([
 # For testing without secrets, set PARHELIA_SKIP_SECRETS=1
 _SKIP_SECRETS = os.environ.get("PARHELIA_SKIP_SECRETS", "").lower() in ("1", "true", "yes")
 
+# When skipping secrets, update images to include the env var for remote consistency
 if _SKIP_SECRETS:
+    cpu_image = cpu_image.env({"PARHELIA_SKIP_SECRETS": "1"})
+    gpu_image = gpu_image.env({"PARHELIA_SKIP_SECRETS": "1"})
     PARHELIA_SECRETS: list = []
 else:
     PARHELIA_SECRETS = [
