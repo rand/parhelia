@@ -27,6 +27,11 @@ import click
 from parhelia.budget import BudgetManager
 from parhelia.checkpoint import CheckpointManager
 from parhelia.config import load_config
+from parhelia.environment import (
+    EnvironmentCapture,
+    diff_environments,
+    format_environment_diff,
+)
 from parhelia.heartbeat import HeartbeatMonitor
 from parhelia.orchestrator import LocalOrchestrator, Task, TaskRequirements, TaskType
 from parhelia.resume import ResumeManager
@@ -572,6 +577,183 @@ def config(ctx: CLIContext, as_json: bool) -> None:
         click.echo(f"  default_ceiling_usd = {ctx.config.budget.default_ceiling_usd}")
         click.echo(f"\n[paths]")
         click.echo(f"  volume_root = {ctx.config.paths.volume_root}")
+
+
+# =============================================================================
+# Environment Command
+# =============================================================================
+
+
+@cli.group()
+def env() -> None:
+    """Environment versioning commands.
+
+    Implements [SPEC-07.10.05].
+    """
+    pass
+
+
+@env.command("show")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+@pass_context
+def env_show(ctx: CLIContext, as_json: bool) -> None:
+    """Show current environment state."""
+
+    async def _capture():
+        capture = EnvironmentCapture()
+        return await capture.capture()
+
+    env_snapshot = asyncio.run(_capture())
+
+    if as_json:
+        click.echo(json.dumps(env_snapshot.to_dict(), indent=2))
+    else:
+        click.echo("Environment Snapshot")
+        click.echo("=" * 40)
+
+        click.echo(f"\nClaude Code:")
+        click.echo(f"  Version: {env_snapshot.claude_code.version}")
+        click.echo(f"  Binary hash: {env_snapshot.claude_code.binary_hash[:16]}...")
+        click.echo(f"  Path: {env_snapshot.claude_code.install_path}")
+
+        if env_snapshot.plugins:
+            click.echo(f"\nPlugins ({len(env_snapshot.plugins)}):")
+            for name, plugin in env_snapshot.plugins.items():
+                click.echo(f"  {name}:")
+                click.echo(f"    Commit: {plugin.git_commit[:8]}")
+                click.echo(f"    Branch: {plugin.git_branch}")
+
+        if env_snapshot.mcp_servers:
+            click.echo(f"\nMCP Servers ({len(env_snapshot.mcp_servers)}):")
+            for name, server in env_snapshot.mcp_servers.items():
+                click.echo(f"  {name}:")
+                click.echo(f"    Type: {server.source_type}")
+                click.echo(f"    Version: {server.version_id}")
+
+        click.echo(f"\nPython:")
+        click.echo(f"  Version: {env_snapshot.python_version}")
+        if env_snapshot.python_packages:
+            click.echo(f"  Key packages:")
+            for name, version in sorted(env_snapshot.python_packages.items()):
+                click.echo(f"    {name}=={version}")
+
+        click.echo(f"\nCaptured at: {env_snapshot.captured_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+@env.command("diff")
+@click.argument("checkpoint_a")
+@click.argument("checkpoint_b")
+@click.option(
+    "--session",
+    "session_id",
+    help="Session ID (required if checkpoint IDs are ambiguous)",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+@pass_context
+def env_diff(
+    ctx: CLIContext,
+    checkpoint_a: str,
+    checkpoint_b: str,
+    session_id: str | None,
+    as_json: bool,
+) -> None:
+    """Compare environments between two checkpoints.
+
+    Implements [SPEC-07.10.05].
+
+    Example:
+        parhelia env diff cp-abc123 cp-def456 --session my-session
+    """
+
+    async def _diff():
+        # Find checkpoints
+        cp_a = None
+        cp_b = None
+
+        if session_id:
+            # Look in specific session
+            checkpoints = await ctx.checkpoint_manager.list_checkpoints(session_id)
+            for cp in checkpoints:
+                if cp.id == checkpoint_a:
+                    cp_a = cp
+                if cp.id == checkpoint_b:
+                    cp_b = cp
+        else:
+            # Search all sessions in checkpoint root
+            checkpoint_root = ctx.checkpoint_manager.checkpoint_root
+            if checkpoint_root.exists():
+                for session_dir in checkpoint_root.iterdir():
+                    if session_dir.is_dir():
+                        checkpoints = await ctx.checkpoint_manager.list_checkpoints(
+                            session_dir.name
+                        )
+                        for cp in checkpoints:
+                            if cp.id == checkpoint_a:
+                                cp_a = cp
+                            if cp.id == checkpoint_b:
+                                cp_b = cp
+                        if cp_a and cp_b:
+                            break
+
+        return cp_a, cp_b
+
+    cp_a, cp_b = asyncio.run(_diff())
+
+    if not cp_a:
+        click.secho(f"Checkpoint not found: {checkpoint_a}", fg="red")
+        sys.exit(1)
+
+    if not cp_b:
+        click.secho(f"Checkpoint not found: {checkpoint_b}", fg="red")
+        sys.exit(1)
+
+    if not cp_a.environment_snapshot:
+        click.secho(
+            f"Checkpoint {checkpoint_a} has no environment snapshot", fg="yellow"
+        )
+        sys.exit(1)
+
+    if not cp_b.environment_snapshot:
+        click.secho(
+            f"Checkpoint {checkpoint_b} has no environment snapshot", fg="yellow"
+        )
+        sys.exit(1)
+
+    # Compute diff
+    diff = diff_environments(cp_a.environment_snapshot, cp_b.environment_snapshot)
+
+    if as_json:
+        diff_dict = {
+            "checkpoint_a": checkpoint_a,
+            "checkpoint_b": checkpoint_b,
+            "claude_code_changed": diff.claude_code_changed,
+            "plugins_added": diff.plugins_added,
+            "plugins_removed": diff.plugins_removed,
+            "plugins_changed": diff.plugins_changed,
+            "mcp_servers_added": diff.mcp_servers_added,
+            "mcp_servers_removed": diff.mcp_servers_removed,
+            "mcp_servers_changed": diff.mcp_servers_changed,
+            "python_version_changed": diff.python_version_changed,
+            "packages_added": diff.packages_added,
+            "packages_removed": diff.packages_removed,
+            "packages_changed": {k: list(v) for k, v in diff.packages_changed.items()},
+        }
+        click.echo(json.dumps(diff_dict, indent=2))
+    else:
+        click.echo(f"Environment Diff: {checkpoint_a} → {checkpoint_b}")
+        click.echo(f"Time: {cp_a.created_at} → {cp_b.created_at}")
+        click.echo()
+        click.echo(format_environment_diff(diff))
 
 
 # =============================================================================

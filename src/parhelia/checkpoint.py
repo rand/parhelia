@@ -4,6 +4,7 @@ Implements:
 - [SPEC-03.11] Conversation State Capture
 - [SPEC-03.12] Checkpoint Triggers
 - [SPEC-03.13] Workspace Snapshot
+- [SPEC-07.10] Environment Versioning
 - [SPEC-08.14] Incremental Workspace Checkpoint (CAS integration)
 """
 
@@ -29,6 +30,7 @@ from parhelia.cas import (
     MerkleTreeBuilder,
     MerkleTreeDiff,
 )
+from parhelia.environment import EnvironmentCapture, EnvironmentSnapshot
 from parhelia.session import Checkpoint, CheckpointTrigger
 
 
@@ -60,15 +62,18 @@ class CheckpointManager:
         self,
         checkpoint_root: str = "/vol/parhelia/checkpoints",
         cas_root: str | None = None,
+        capture_environment: bool = True,
     ):
         """Initialize the checkpoint manager.
 
         Args:
             checkpoint_root: Root directory for checkpoint storage.
             cas_root: Root directory for CAS storage. If set, enables CAS mode.
+            capture_environment: Whether to capture environment at checkpoint time.
         """
         self.checkpoint_root = Path(checkpoint_root)
         self.cas_root = cas_root
+        self.capture_environment = capture_environment
 
         # Initialize CAS components if CAS mode enabled
         if cas_root:
@@ -81,6 +86,9 @@ class CheckpointManager:
             self._tree_builder = None
             self._tree_diff = None
             self._cas_checkpoint_mgr = None
+
+        # Environment capture [SPEC-07.10]
+        self._env_capture = EnvironmentCapture() if capture_environment else None
 
     async def create_checkpoint(
         self,
@@ -136,6 +144,15 @@ class CheckpointManager:
                     checkpoint_id=checkpoint_id,
                 )
 
+        # Capture environment [SPEC-07.10]
+        environment_snapshot: EnvironmentSnapshot | None = None
+        if self._env_capture:
+            try:
+                environment_snapshot = await self._env_capture.capture()
+            except Exception:
+                # Don't fail checkpoint if environment capture fails
+                pass
+
         # Create checkpoint object
         checkpoint = Checkpoint(
             id=checkpoint_id,
@@ -146,6 +163,7 @@ class CheckpointManager:
             workspace_snapshot=workspace_snapshot,
             workspace_root=workspace_root,
             uncommitted_changes=uncommitted_changes,
+            environment_snapshot=environment_snapshot,
         )
 
         # Save manifest
@@ -308,7 +326,7 @@ class CheckpointManager:
     async def _save_manifest(self, checkpoint: Checkpoint, checkpoint_dir: Path) -> None:
         """Save checkpoint manifest."""
         manifest = {
-            "version": "1.1",  # Bumped for CAS support
+            "version": "1.2",  # Bumped for environment versioning [SPEC-07.11]
             "id": checkpoint.id,
             "session_id": checkpoint.session_id,
             "created_at": checkpoint.created_at.isoformat(),
@@ -326,6 +344,10 @@ class CheckpointManager:
                 "hash": checkpoint.workspace_root.hash,
                 "size_bytes": checkpoint.workspace_root.size_bytes,
             }
+
+        # Add environment snapshot [SPEC-07.10]
+        if checkpoint.environment_snapshot:
+            manifest["environment"] = checkpoint.environment_snapshot.to_dict()
 
         manifest_path = checkpoint_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -367,6 +389,11 @@ class CheckpointManager:
                     size_bytes=data["workspace_root"]["size_bytes"],
                 )
 
+            # Load environment snapshot if present [SPEC-07.10]
+            environment_snapshot = None
+            if data.get("environment"):
+                environment_snapshot = EnvironmentSnapshot.from_dict(data["environment"])
+
             return Checkpoint(
                 id=data["id"],
                 session_id=data["session_id"],
@@ -378,6 +405,7 @@ class CheckpointManager:
                 uncommitted_changes=data.get("uncommitted_changes", []),
                 tokens_used=data.get("tokens_used", 0),
                 cost_estimate=data.get("cost_estimate", 0.0),
+                environment_snapshot=environment_snapshot,
             )
         except Exception:
             return None

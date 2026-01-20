@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from parhelia.cas import Digest
+    from parhelia.environment import EnvironmentSnapshot
 
 
 class SessionState(Enum):
@@ -171,6 +172,9 @@ class Checkpoint:
     tokens_used: int = 0
     cost_estimate: float = 0.0
     tools_invoked: list[str] = field(default_factory=list)
+
+    # Environment versioning [SPEC-07.10]
+    environment_snapshot: EnvironmentSnapshot | None = None
 
     # Verification
     verified: bool = False
