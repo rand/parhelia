@@ -1092,19 +1092,24 @@ def memory_show(ctx: CLIContext, as_json: bool) -> None:
         click.echo(json.dumps(manager.memory.to_dict(), indent=2, default=str))
     else:
         mem = manager.memory
+        knowledge = mem.knowledge
         click.echo("Project Memory")
         click.echo("=" * 40)
 
-        if mem.architecture:
+        if knowledge.architecture:
             click.echo(f"\nArchitecture:")
-            click.echo(f"  {mem.architecture.summary}")
+            click.echo(f"  {knowledge.architecture.summary}")
 
-        click.echo(f"\nConventions ({len(mem.conventions)}):")
-        for conv in mem.conventions[:10]:
-            click.echo(f"  {conv.key}: {conv.value}")
+        if knowledge.conventions:
+            conventions = knowledge.conventions.conventions
+            click.echo(f"\nConventions ({len(conventions)}):")
+            for key, value in list(conventions.items())[:10]:
+                click.echo(f"  {key}: {value}")
+        else:
+            click.echo("\nConventions (0):")
 
-        click.echo(f"\nGotchas ({len(mem.gotchas)}):")
-        for gotcha in mem.gotchas[:5]:
+        click.echo(f"\nGotchas ({len(knowledge.gotchas)}):")
+        for gotcha in knowledge.gotchas[:5]:
             click.echo(f"  • {gotcha.description}")
 
         click.echo(f"\nSession History ({len(mem.session_history)}):")

@@ -43,11 +43,22 @@ class PathsConfig:
 
 
 @dataclass
+class BudgetConfig:
+    """Budget configuration [SPEC-05.14]."""
+
+    default_ceiling_usd: float = 10.0  # Default budget ceiling per session
+    warning_threshold: float = 0.8  # Warn at 80% usage
+    max_cost_per_task: float = 5.0  # Max cost for single task
+    max_daily_cost: float = 100.0  # Daily spending limit
+
+
+@dataclass
 class ParheliaConfig:
     """Root configuration for Parhelia."""
 
     modal: ModalConfig = field(default_factory=ModalConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    budget: BudgetConfig = field(default_factory=BudgetConfig)  # [SPEC-05.14]
     approval: "ApprovalConfig | None" = None  # Lazy loaded to avoid circular import
     notifications: "NotificationConfig | None" = None  # [SPEC-07.21]
 
@@ -90,6 +101,7 @@ def _parse_config(data: dict) -> ParheliaConfig:
     """Parse configuration dictionary into ParheliaConfig."""
     modal_data = data.get("modal", {})
     paths_data = data.get("paths", {})
+    budget_data = data.get("budget", {})
 
     modal_config = ModalConfig(
         region=modal_data.get("region", "us-east"),
@@ -104,6 +116,13 @@ def _parse_config(data: dict) -> ParheliaConfig:
         checkpoint_root=paths_data.get("checkpoint_root", "/vol/parhelia/checkpoints"),
         audit_root=paths_data.get("audit_root", "/vol/parhelia/audit"),
         cas_root=paths_data.get("cas_root"),
+    )
+
+    budget_config = BudgetConfig(
+        default_ceiling_usd=budget_data.get("default_ceiling_usd", 10.0),
+        warning_threshold=budget_data.get("warning_threshold", 0.8),
+        max_cost_per_task=budget_data.get("max_cost_per_task", 5.0),
+        max_daily_cost=budget_data.get("max_daily_cost", 100.0),
     )
 
     # Parse approval config if present [SPEC-07.20.02]
@@ -123,6 +142,7 @@ def _parse_config(data: dict) -> ParheliaConfig:
     return ParheliaConfig(
         modal=modal_config,
         paths=paths_config,
+        budget=budget_config,
         approval=approval_config,
         notifications=notification_config,
     )
