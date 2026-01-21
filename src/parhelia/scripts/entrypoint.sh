@@ -89,9 +89,47 @@ log "Signaling readiness..."
 echo "PARHELIA_READY" > "${READY_FILE}"
 log "Container ready (${READY_FILE} written)"
 
-# Keep container alive (if not running interactively)
+# =============================================================================
+# 6. Idle monitoring and auto-termination
+# =============================================================================
+IDLE_TIMEOUT_MINUTES="${PARHELIA_IDLE_TIMEOUT:-30}"
+IDLE_CHECK_INTERVAL=60  # Check every 60 seconds
+
+get_tmux_activity() {
+    # Get last activity time from tmux (format: Unix timestamp)
+    tmux display-message -p -t main '#{session_activity}' 2>/dev/null || echo "0"
+}
+
+check_idle_and_terminate() {
+    local last_activity
+    local current_time
+    local idle_seconds
+    local idle_minutes
+
+    last_activity=$(get_tmux_activity)
+    current_time=$(date +%s)
+    idle_seconds=$((current_time - last_activity))
+    idle_minutes=$((idle_seconds / 60))
+
+    if [[ ${idle_minutes} -ge ${IDLE_TIMEOUT_MINUTES} ]]; then
+        log "IDLE TIMEOUT: No activity for ${idle_minutes} minutes (threshold: ${IDLE_TIMEOUT_MINUTES})"
+        log "Auto-terminating container to prevent cost overrun"
+
+        # Create a checkpoint marker before exit
+        echo "IDLE_TERMINATED at $(date -Iseconds)" > /tmp/termination_reason
+
+        # Clean shutdown
+        tmux kill-server 2>/dev/null || true
+        exit 0
+    fi
+}
+
+# Keep container alive with idle monitoring
 if [[ "${PARHELIA_INTERACTIVE:-false}" != "true" ]]; then
-    log "Running in non-interactive mode, waiting..."
-    # Wait indefinitely (container will be terminated by orchestrator)
-    exec tail -f /dev/null
+    log "Running in non-interactive mode with idle monitoring (timeout: ${IDLE_TIMEOUT_MINUTES}min)"
+
+    while true; do
+        sleep ${IDLE_CHECK_INTERVAL}
+        check_idle_and_terminate
+    done
 fi

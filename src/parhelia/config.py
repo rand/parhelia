@@ -29,7 +29,8 @@ class ModalConfig:
     volume_name: str = "parhelia-vol"
     cpu_count: int = 4
     memory_mb: int = 16384
-    default_timeout_hours: int = 24
+    default_timeout_hours: int = 4  # Reduced from 24 to limit cost exposure
+    max_concurrent_containers: int = 5  # Hard limit on concurrent containers
 
 
 @dataclass
@@ -108,7 +109,8 @@ def _parse_config(data: dict) -> ParheliaConfig:
         volume_name=modal_data.get("volume_name", "parhelia-vol"),
         cpu_count=modal_data.get("cpu_count", 4),
         memory_mb=modal_data.get("memory_mb", 16384),
-        default_timeout_hours=modal_data.get("default_timeout_hours", 24),
+        default_timeout_hours=modal_data.get("default_timeout_hours", 4),
+        max_concurrent_containers=modal_data.get("max_concurrent_containers", 5),
     )
 
     paths_config = PathsConfig(

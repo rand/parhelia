@@ -48,6 +48,10 @@ def validate_budget(ctx: dict) -> tuple[bool, str]:
     if budget_remaining is None:
         return True, "Budget not tracked"
 
+    # HARD STOP: Reject if budget is exhausted (< $0.50)
+    if budget_remaining < 0.50:
+        return False, f"BUDGET EXHAUSTED: Only ${budget_remaining:.2f} remaining. Run 'parhelia budget set <amount>' to increase."
+
     if estimated_cost is None:
         # Can't estimate, allow with warning
         return True, "Cost estimate unavailable"
@@ -56,10 +60,46 @@ def validate_budget(ctx: dict) -> tuple[bool, str]:
         return False, f"Estimated cost ${estimated_cost:.2f} exceeds remaining budget ${budget_remaining:.2f}"
 
     # Warn if getting close to budget
-    if budget_remaining - estimated_cost < budget_remaining * 0.1:
+    if budget_remaining - estimated_cost < budget_remaining * 0.2:
         return True, f"Warning: This task will use most of remaining budget (${budget_remaining:.2f} remaining)"
 
     return True, f"Budget OK: ${budget_remaining:.2f} remaining"
+
+
+def validate_container_limit(ctx: dict) -> tuple[bool, str]:
+    """Check if we're under the container limit.
+
+    Returns:
+        (allowed, message) tuple
+    """
+    import subprocess
+
+    max_containers = ctx.get("max_concurrent_containers", 5)
+
+    try:
+        # Count active parhelia containers
+        result = subprocess.run(
+            ["modal", "container", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = result.stdout + result.stderr
+
+        # Count lines containing 'parhelia'
+        active_count = sum(1 for line in output.split('\n') if 'parhelia' in line.lower() and 'ta-' in line)
+
+        if active_count >= max_containers:
+            return False, f"CONTAINER LIMIT: {active_count} containers running (max: {max_containers}). Run 'parhelia cleanup' first."
+
+        if active_count >= max_containers - 1:
+            return True, f"Warning: {active_count}/{max_containers} containers running"
+
+        return True, f"Containers OK: {active_count}/{max_containers}"
+
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # Can't check, allow with warning
+        return True, "Warning: Could not verify container count"
 
 
 def validate_resources(ctx: dict) -> tuple[bool, str]:
@@ -87,11 +127,16 @@ def main():
     ctx = get_context()
     task_id = ctx.get("task_id", "unknown")
 
-    # Run validations
+    # Run validations (order matters - check limits first)
+    container_ok, container_msg = validate_container_limit(ctx)
     budget_ok, budget_msg = validate_budget(ctx)
     resource_ok, resource_msg = validate_resources(ctx)
 
-    # Determine result
+    # Determine result - reject on any hard failure
+    if not container_ok:
+        output("reject", container_msg, task_id=task_id)
+        sys.exit(1)
+
     if not budget_ok:
         output("reject", budget_msg, task_id=task_id)
         sys.exit(1)
@@ -102,6 +147,8 @@ def main():
 
     # Check for warnings
     warnings = []
+    if "Warning:" in container_msg:
+        warnings.append(container_msg)
     if "Warning:" in budget_msg:
         warnings.append(budget_msg)
     if "Warning:" in resource_msg:

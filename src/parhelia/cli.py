@@ -2149,6 +2149,130 @@ def mcp_server() -> None:
 
 
 # =============================================================================
+# Cleanup Command
+# =============================================================================
+
+
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Show what would be cleaned up without doing it")
+@click.option("--force", is_flag=True, help="Skip confirmation prompt")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def cleanup(ctx: CLIContext, dry_run: bool, force: bool, as_json: bool) -> None:
+    """Find and terminate orphaned Modal containers.
+
+    Scans for running Parhelia containers and terminates them.
+    Use this to stop runaway containers and prevent cost overruns.
+
+    Examples:
+        parhelia cleanup              # Interactive cleanup
+        parhelia cleanup --dry-run    # See what would be cleaned
+        parhelia cleanup --force      # Skip confirmation
+    """
+    import subprocess
+
+    def run_modal_cmd(args: list[str]) -> str:
+        """Run modal CLI command and return output."""
+        result = subprocess.run(
+            ["modal"] + args,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.stdout + result.stderr
+
+    # Get active containers
+    try:
+        output = run_modal_cmd(["container", "list"])
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        click.secho(f"Error running modal CLI: {e}", fg="red")
+        sys.exit(1)
+
+    # Parse container output - look for parhelia app
+    lines = output.strip().split("\n")
+    parhelia_containers = []
+
+    for line in lines:
+        if "parhelia" in line.lower() and "ta-" in line:
+            # Extract container ID (starts with ta-)
+            parts = line.split()
+            for part in parts:
+                if part.startswith("ta-"):
+                    container_id = part.rstrip("…")
+                    parhelia_containers.append(container_id)
+                    break
+
+    if not parhelia_containers:
+        if as_json:
+            click.echo('{"containers_found": 0, "action": "none"}')
+        else:
+            click.secho("No orphaned Parhelia containers found.", fg="green")
+        return
+
+    # Show what we found
+    if as_json:
+        data = {
+            "containers_found": len(parhelia_containers),
+            "container_ids": parhelia_containers,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            data["action"] = "would_terminate"
+            click.echo(json.dumps(data, indent=2))
+            return
+    else:
+        click.echo(f"\nFound {len(parhelia_containers)} Parhelia container(s):")
+        for cid in parhelia_containers[:10]:
+            click.echo(f"  • {cid}")
+        if len(parhelia_containers) > 10:
+            click.echo(f"  ... and {len(parhelia_containers) - 10} more")
+
+        if dry_run:
+            click.secho("\n[DRY RUN] Would terminate these containers", fg="yellow")
+            return
+
+    # Confirm unless --force
+    if not force:
+        click.echo()
+        if not click.confirm(f"Terminate {len(parhelia_containers)} container(s)?", default=True):
+            click.echo("Aborted.")
+            return
+
+    # Stop the app (terminates all containers)
+    click.echo("\nTerminating containers...")
+    try:
+        run_modal_cmd(["app", "stop", "parhelia"])
+    except subprocess.TimeoutExpired:
+        click.secho("Timeout stopping app, trying individual containers...", fg="yellow")
+
+    # Verify cleanup
+    try:
+        output = run_modal_cmd(["container", "list"])
+        remaining = output.count("parhelia")
+        if remaining == 0 or "parhelia" not in output.lower():
+            if as_json:
+                click.echo(json.dumps({
+                    "containers_terminated": len(parhelia_containers),
+                    "action": "terminated",
+                    "success": True,
+                }))
+            else:
+                click.secho(f"\n✓ Successfully terminated {len(parhelia_containers)} container(s)", fg="green")
+        else:
+            if as_json:
+                click.echo(json.dumps({
+                    "containers_terminated": len(parhelia_containers),
+                    "action": "partial",
+                    "success": False,
+                    "message": "Some containers may still be running",
+                }))
+            else:
+                click.secho("\n⚠ Some containers may still be running. Check Modal dashboard.", fg="yellow")
+    except Exception as e:
+        click.secho(f"Could not verify cleanup: {e}", fg="yellow")
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 
