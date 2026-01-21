@@ -269,6 +269,21 @@ def list_sessions(ctx: CLIContext, status: str, limit: int) -> None:
     type=click.Path(exists=True),
     help="Working directory for the task",
 )
+@click.option(
+    "--dispatch/--no-dispatch",
+    default=True,
+    help="Dispatch task to Modal immediately (default: yes)",
+)
+@click.option(
+    "--sync",
+    is_flag=True,
+    help="Wait for task completion (synchronous dispatch)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Skip actual Modal execution (for testing)",
+)
 @pass_context
 def submit(
     ctx: CLIContext,
@@ -277,9 +292,20 @@ def submit(
     gpu: str,
     memory: int,
     workspace: str | None,
+    dispatch: bool,
+    sync: bool,
+    dry_run: bool,
 ) -> None:
-    """Submit a new task for execution."""
+    """Submit a new task for execution.
+
+    By default, tasks are dispatched to Modal immediately in async mode.
+    Use --no-dispatch to only persist the task without execution.
+    Use --sync to wait for completion.
+    Use --dry-run to test without Modal.
+    """
     import uuid
+
+    from parhelia.dispatch import DispatchMode, TaskDispatcher
 
     task_type_map = {
         "generic": TaskType.GENERIC,
@@ -302,14 +328,194 @@ def submit(
         ),
     )
 
-    async def _submit():
+    async def _submit_and_dispatch():
+        # Always persist the task first
         task_id = await ctx.orchestrator.submit_task(task)
-        return task_id
+        click.echo(f"Task submitted: {task_id}")
 
-    task_id = asyncio.run(_submit())
+        if not dispatch:
+            ctx.log("Task saved but not dispatched (use --dispatch to run)", "info")
+            return task_id, None
 
-    click.echo(f"Task submitted: {task_id}")
-    ctx.log(f"Type: {task_type}, GPU: {gpu}, Memory: {memory}GB", "info")
+        # Dispatch to Modal
+        dispatcher = TaskDispatcher(ctx.orchestrator, skip_modal=dry_run)
+
+        def progress(msg: str) -> None:
+            if ctx.verbose or dry_run:
+                click.echo(f"  {msg}")
+
+        dispatcher.set_progress_callback(progress)
+
+        mode = DispatchMode.SYNC if sync else DispatchMode.ASYNC
+        mode_str = "sync" if sync else "async"
+        dry_str = " (dry-run)" if dry_run else ""
+
+        click.echo(f"Dispatching{dry_str} in {mode_str} mode...")
+
+        result = await dispatcher.dispatch(task, mode=mode)
+
+        if result.success:
+            click.echo(f"Worker started: {result.worker_id}")
+            if result.sandbox_id:
+                ctx.log(f"Sandbox: {result.sandbox_id}", "info")
+            if result.output and sync:
+                click.echo("\nOutput:")
+                click.echo(result.output)
+        else:
+            click.secho(f"Dispatch failed: {result.error}", fg="red")
+
+        return task_id, result
+
+    asyncio.run(_submit_and_dispatch())
+
+
+# =============================================================================
+# Task Command Group
+# =============================================================================
+
+
+@cli.group()
+def task() -> None:
+    """Task management commands."""
+    pass
+
+
+@task.command("show")
+@click.argument("task_id")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def task_show(ctx: CLIContext, task_id: str, as_json: bool) -> None:
+    """Show detailed information about a task."""
+
+    async def _show():
+        task = await ctx.orchestrator.get_task(task_id)
+        if not task:
+            click.secho(f"Task not found: {task_id}", fg="red")
+            sys.exit(1)
+
+        status = ctx.orchestrator.task_store.get_status(task_id)
+        result = ctx.orchestrator.task_store.get_result(task_id)
+        worker = ctx.orchestrator.worker_store.get_by_task(task_id)
+
+        if as_json:
+            import json
+            from dataclasses import asdict
+            data = {
+                "task": {
+                    "id": task.id,
+                    "prompt": task.prompt,
+                    "type": task.task_type.value,
+                    "status": status,
+                    "created_at": task.created_at.isoformat(),
+                    "requirements": {
+                        "needs_gpu": task.requirements.needs_gpu,
+                        "gpu_type": task.requirements.gpu_type,
+                        "min_memory_gb": task.requirements.min_memory_gb,
+                    },
+                },
+                "worker": {
+                    "id": worker.id,
+                    "state": worker.state.value,
+                    "target_type": worker.target_type,
+                } if worker else None,
+                "result": {
+                    "status": result.status,
+                    "output": result.output[:500] if result.output else None,
+                    "cost_usd": result.cost_usd,
+                } if result else None,
+            }
+            click.echo(json.dumps(data, indent=2))
+            return
+
+        click.echo(f"Task: {task.id}")
+        click.echo("=" * 50)
+        click.echo(f"Status:     {status}")
+        click.echo(f"Type:       {task.task_type.value}")
+        click.echo(f"Created:    {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(f"\nPrompt:")
+        click.echo(f"  {task.prompt[:200]}{'...' if len(task.prompt) > 200 else ''}")
+
+        click.echo(f"\nRequirements:")
+        click.echo(f"  GPU:      {task.requirements.gpu_type or 'none'}")
+        click.echo(f"  Memory:   {task.requirements.min_memory_gb}GB")
+
+        if worker:
+            click.echo(f"\nWorker:")
+            click.echo(f"  ID:       {worker.id}")
+            click.echo(f"  State:    {worker.state.value}")
+            click.echo(f"  Target:   {worker.target_type}")
+
+        if result:
+            click.echo(f"\nResult:")
+            click.echo(f"  Status:   {result.status}")
+            click.echo(f"  Cost:     ${result.cost_usd:.4f}")
+            if result.output:
+                click.echo(f"  Output:   {result.output[:100]}...")
+
+    asyncio.run(_show())
+
+
+@task.command("dispatch")
+@click.argument("task_id", required=False)
+@click.option("--all", "dispatch_all", is_flag=True, help="Dispatch all pending tasks")
+@click.option("--limit", default=10, help="Max tasks to dispatch when using --all")
+@click.option("--dry-run", is_flag=True, help="Skip actual Modal execution")
+@pass_context
+def task_dispatch(
+    ctx: CLIContext,
+    task_id: str | None,
+    dispatch_all: bool,
+    limit: int,
+    dry_run: bool,
+) -> None:
+    """Dispatch pending task(s) to Modal.
+
+    Examples:
+        parhelia task dispatch task-abc123
+        parhelia task dispatch --all
+        parhelia task dispatch --all --limit 5 --dry-run
+    """
+    from parhelia.dispatch import DispatchMode, TaskDispatcher
+
+    async def _dispatch():
+        dispatcher = TaskDispatcher(ctx.orchestrator, skip_modal=dry_run)
+
+        def progress(msg: str) -> None:
+            click.echo(f"  {msg}")
+
+        dispatcher.set_progress_callback(progress)
+
+        if dispatch_all:
+            click.echo(f"Dispatching up to {limit} pending tasks...")
+            results = await dispatcher.dispatch_pending(limit=limit)
+            success = sum(1 for r in results if r.success)
+            click.echo(f"\nDispatched {success}/{len(results)} tasks")
+            for r in results:
+                status = click.style("ok", fg="green") if r.success else click.style("failed", fg="red")
+                click.echo(f"  {r.task_id}: {status}")
+        elif task_id:
+            task = await ctx.orchestrator.get_task(task_id)
+            if not task:
+                click.secho(f"Task not found: {task_id}", fg="red")
+                sys.exit(1)
+
+            status = ctx.orchestrator.task_store.get_status(task_id)
+            if status != "pending":
+                click.secho(f"Task is not pending (status: {status})", fg="yellow")
+                return
+
+            click.echo(f"Dispatching task {task_id}...")
+            result = await dispatcher.dispatch(task, mode=DispatchMode.ASYNC)
+
+            if result.success:
+                click.secho(f"Dispatched: worker {result.worker_id}", fg="green")
+            else:
+                click.secho(f"Failed: {result.error}", fg="red")
+        else:
+            click.echo("Specify a task ID or use --all")
+            sys.exit(1)
+
+    asyncio.run(_dispatch())
 
 
 # =============================================================================

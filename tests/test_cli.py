@@ -168,35 +168,75 @@ class TestListCommand:
 class TestSubmitCommand:
     """Tests for submit command."""
 
-    def test_submit_creates_task(self, runner, mock_config):
+    def test_submit_creates_task(self, runner, mock_config, tmp_path):
         """submit MUST create and submit task."""
+        from parhelia.persistence import PersistentOrchestrator
+
         with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["submit", "Test prompt"])
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["submit", "Test prompt", "--no-dispatch"])
 
-            assert result.exit_code == 0
-            assert "Task submitted:" in result.output
+                assert result.exit_code == 0
+                assert "Task submitted:" in result.output
 
-    def test_submit_with_type(self, runner, mock_config):
+    def test_submit_with_type(self, runner, mock_config, tmp_path):
         """submit MUST accept task type option."""
+        from parhelia.persistence import PersistentOrchestrator
+
         with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["submit", "Run tests", "-t", "test"])
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["submit", "Run tests", "-t", "test", "--no-dispatch"])
 
-            assert result.exit_code == 0
-            assert "Task submitted:" in result.output
+                assert result.exit_code == 0
+                assert "Task submitted:" in result.output
 
-    def test_submit_with_gpu(self, runner, mock_config):
+    def test_submit_with_gpu(self, runner, mock_config, tmp_path):
         """submit MUST accept GPU option."""
+        from parhelia.persistence import PersistentOrchestrator
+
         with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["submit", "GPU task", "--gpu", "A10G"])
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["submit", "GPU task", "--gpu", "A10G", "--no-dispatch"])
 
-            assert result.exit_code == 0
+                assert result.exit_code == 0
 
-    def test_submit_with_memory(self, runner, mock_config):
+    def test_submit_with_memory(self, runner, mock_config, tmp_path):
         """submit MUST accept memory option."""
-        with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["submit", "Big task", "--memory", "16"])
+        from parhelia.persistence import PersistentOrchestrator
 
-            assert result.exit_code == 0
+        with patch("parhelia.cli.load_config", return_value=mock_config):
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["submit", "Big task", "--memory", "16", "--no-dispatch"])
+
+                assert result.exit_code == 0
+
+    def test_submit_with_dispatch_dry_run(self, runner, mock_config, tmp_path):
+        """submit MUST dispatch with --dry-run."""
+        from parhelia.persistence import PersistentOrchestrator
+
+        with patch("parhelia.cli.load_config", return_value=mock_config):
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["submit", "Test dry run", "--dry-run"])
+
+                assert result.exit_code == 0
+                assert "Task submitted:" in result.output
+                assert "Dispatching (dry-run)" in result.output
+                assert "Worker started:" in result.output
 
 
 # =============================================================================
