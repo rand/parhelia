@@ -3,6 +3,7 @@
 Implements:
 - [SPEC-05.11] Dispatch Logic
 - [SPEC-05.12] Worker Lifecycle Management
+- [SPEC-10.50] Hook Framework
 
 Connects the persistence layer to Modal execution.
 """
@@ -26,6 +27,9 @@ from parhelia.persistence import PersistentOrchestrator
 
 if TYPE_CHECKING:
     import modal
+
+    from parhelia.budget import BudgetManager
+    from parhelia.hook_executor import HookExecutor
 
 
 class DispatchError(Exception):
@@ -69,20 +73,28 @@ class TaskDispatcher:
         self,
         orchestrator: PersistentOrchestrator,
         skip_modal: bool = False,
+        hook_executor: "HookExecutor | None" = None,
+        budget_manager: "BudgetManager | None" = None,
     ):
         """Initialize the dispatcher.
 
         Args:
             orchestrator: The persistent orchestrator for state management.
             skip_modal: If True, skip actual Modal calls (for testing/dry-run).
+            hook_executor: Optional hook executor for pre/post dispatch hooks.
+            budget_manager: Optional budget manager for hook context.
         """
         self.orchestrator = orchestrator
         self.skip_modal = skip_modal
+        self.hook_executor = hook_executor
+        self.budget_manager = budget_manager
         self._progress_callback: Callable[[str], None] | None = None
 
     def set_progress_callback(self, callback: Callable[[str], None]) -> None:
         """Set callback for progress updates."""
         self._progress_callback = callback
+        if self.hook_executor:
+            self.hook_executor.set_log_callback(callback)
 
     def _log(self, message: str) -> None:
         """Log progress message."""
@@ -106,22 +118,96 @@ class TaskDispatcher:
             DispatchResult with worker/sandbox info.
 
         Raises:
-            DispatchError: If dispatch fails.
+            DispatchError: If dispatch fails or is rejected by pre-dispatch hook.
         """
         worker_id = f"worker-{uuid.uuid4().hex[:8]}"
+
+        # Run pre-dispatch hook
+        if self.hook_executor:
+            hook_result = await self._run_pre_dispatch_hook(task)
+            if hook_result and hook_result.get("rejected"):
+                raise DispatchError(f"Pre-dispatch hook rejected: {hook_result.get('message', 'Unknown reason')}")
 
         # Update task status to running
         self.orchestrator.task_store.update_status(task.id, "running")
 
         if self.skip_modal:
-            return await self._dispatch_dry_run(task, worker_id)
+            result = await self._dispatch_dry_run(task, worker_id)
+        else:
+            try:
+                result = await self._dispatch_to_modal(task, worker_id, mode, timeout_hours)
+            except Exception as e:
+                # Mark task as failed
+                self.orchestrator.mark_task_failed(task.id, str(e))
+                raise DispatchError(f"Failed to dispatch task {task.id}: {e}") from e
 
-        try:
-            return await self._dispatch_to_modal(task, worker_id, mode, timeout_hours)
-        except Exception as e:
-            # Mark task as failed
-            self.orchestrator.mark_task_failed(task.id, str(e))
-            raise DispatchError(f"Failed to dispatch task {task.id}: {e}") from e
+        # Run post-dispatch hook
+        if self.hook_executor and result.success:
+            await self._run_post_dispatch_hook(task, result)
+
+        return result
+
+    async def _run_pre_dispatch_hook(self, task: Task) -> dict[str, Any] | None:
+        """Run pre-dispatch hook and return result.
+
+        Returns:
+            Dict with 'rejected' bool and 'message' if hook ran, None otherwise.
+        """
+        from parhelia.hook_executor import (
+            HookResult,
+            HookType,
+            create_hook_context_from_task,
+        )
+
+        # Get budget info for hook context
+        budget_remaining = None
+        estimated_cost = None
+        if self.budget_manager:
+            budget_remaining = self.budget_manager.remaining_usd
+
+            # Estimate cost based on requirements
+            hours = task.requirements.estimated_duration_minutes / 60
+            if task.requirements.needs_gpu:
+                # GPU pricing ~$2-4/hr depending on type
+                estimated_cost = hours * 3.0
+            else:
+                # CPU pricing ~$0.20/hr
+                estimated_cost = hours * 0.20
+
+        context = create_hook_context_from_task(
+            task=task,
+            hook_type=HookType.PRE_DISPATCH,
+            budget_remaining_usd=budget_remaining,
+            estimated_cost_usd=estimated_cost,
+        )
+
+        output = await self.hook_executor.run_pre_dispatch(context)
+
+        if output.result == HookResult.REJECT:
+            self._log(f"Pre-dispatch hook rejected: {output.message}")
+            return {"rejected": True, "message": output.message}
+        elif output.result == HookResult.WARN:
+            self._log(f"Pre-dispatch hook warning: {output.message}")
+        elif output.result == HookResult.ERROR:
+            self._log(f"Pre-dispatch hook error: {output.message}")
+            # Continue based on fail_open setting (handled in HookExecutor)
+
+        return {"rejected": False, "message": output.message}
+
+    async def _run_post_dispatch_hook(self, task: Task, result: "DispatchResult") -> None:
+        """Run post-dispatch hook for audit/logging."""
+        from parhelia.hook_executor import HookType, create_hook_context_from_task
+
+        context = create_hook_context_from_task(
+            task=task,
+            hook_type=HookType.POST_DISPATCH,
+            worker_id=result.worker_id,
+        )
+
+        output = await self.hook_executor.run_post_dispatch(context)
+
+        if output.message:
+            self._log(f"Post-dispatch: {output.message}")
 
     async def _dispatch_dry_run(
         self,
