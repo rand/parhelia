@@ -73,23 +73,23 @@ parhelia attach <session-id>
 
 ```
 Local Machine                    Modal.com
-┌─────────────────┐             ┌─────────────────────────────────┐
-│  parhelia CLI   │────────────▶│  Modal Sandbox                  │
-│                 │             │  ┌─────────────────────────────┐│
-│  - submit tasks │             │  │ Claude Code + your config   ││
-│  - view results │             │  │ tmux session                ││
-│  - attach       │             │  │ checkpoint manager          ││
-└─────────────────┘             │  └─────────────────────────────┘│
+┌─────────────────┐             ┌──────────────────────────────────┐
+│  parhelia CLI   │────────────▶│  Modal Sandbox                   │
+│                 │             │  ┌─────────────────────────────┐ │
+│  - submit tasks │             │  │ Claude Code + your config   │ │
+│  - view results │             │  │ tmux session                │ │
+│  - attach       │             │  │ checkpoint manager          │ │
+└─────────────────┘             │  └─────────────────────────────┘ │
                                 │              │                   │
                                 │              ▼                   │
-                                │  ┌─────────────────────────────┐│
-                                │  │ Modal Volume                ││
-                                │  │ - ~/.claude/ config         ││
-                                │  │ - plugins/                  ││
-                                │  │ - checkpoints/              ││
-                                │  │ - workspaces/               ││
-                                │  └─────────────────────────────┘│
-                                └─────────────────────────────────┘
+                                │  ┌─────────────────────────────┐ │
+                                │  │ Modal Volume                │ │
+                                │  │ - ~/.claude/ config         │ │
+                                │  │ - plugins/                  │ │
+                                │  │ - checkpoints/              │ │
+                                │  │ - workspaces/               │ │
+                                │  └─────────────────────────────┘ │
+                                └──────────────────────────────────┘
 ```
 
 ## Configuration
