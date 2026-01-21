@@ -231,45 +231,15 @@ async def run_in_sandbox(
         await process.wait.aio()
         return "".join(stdout_lines)
 
-    # For complex commands (like Claude), use file-based capture with smart polling.
-    # Claude Code in -p mode doesn't always exit cleanly, so we poll for output
-    # stability and return when no new output has been produced for a while.
-    output_file = f"/tmp/parhelia_out_{uuid.uuid4().hex[:8]}.txt"
+    # For complex commands (like Claude Code), close stdin to ensure clean exit.
+    # Claude Code in -p mode waits for stdin by default; closing it with < /dev/null
+    # allows the process to exit cleanly after producing output.
     cmd_str = " ".join(f'"{c}"' if " " in c else c for c in command)
 
-    # Bash script that:
-    # 1. Runs command in background
-    # 2. Polls output file size until stable (no change for 5 seconds) or timeout
-    # 3. Kills process and returns output
-    poll_script = f'''
-{cmd_str} > {output_file} 2>&1 &
-PID=$!
-PREV_SIZE=0
-STABLE_COUNT=0
-ELAPSED=0
-while [ $ELAPSED -lt {timeout_seconds} ]; do
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
-    if [ -f {output_file} ]; then
-        CURR_SIZE=$(stat -c%s {output_file} 2>/dev/null || stat -f%z {output_file} 2>/dev/null || echo 0)
-        if [ "$CURR_SIZE" = "$PREV_SIZE" ] && [ "$CURR_SIZE" -gt 0 ]; then
-            STABLE_COUNT=$((STABLE_COUNT + 1))
-            if [ $STABLE_COUNT -ge 5 ]; then
-                break
-            fi
-        else
-            STABLE_COUNT=0
-            PREV_SIZE=$CURR_SIZE
-        fi
-    fi
-done
-kill $PID 2>/dev/null
-wait $PID 2>/dev/null
-cat {output_file} 2>/dev/null
-rm -f {output_file}
-'''
+    # Run with timeout and closed stdin
+    wrapper = f"timeout {timeout_seconds} {cmd_str} < /dev/null 2>&1"
 
-    process = await sandbox.exec.aio("bash", "-c", poll_script)
+    process = await sandbox.exec.aio("bash", "-c", wrapper)
     stdout_lines = []
     for line in process.stdout:
         stdout_lines.append(line)

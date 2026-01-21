@@ -284,6 +284,23 @@ class CheckpointManager:
             return None
         return checkpoints[-1]
 
+    async def update_checkpoint(self, checkpoint: Checkpoint) -> None:
+        """Update an existing checkpoint's manifest.
+
+        Use this to persist changes to approval status, annotations, or tags.
+
+        Args:
+            checkpoint: The checkpoint with updated fields.
+
+        Raises:
+            FileNotFoundError: If the checkpoint directory doesn't exist.
+        """
+        checkpoint_dir = self.checkpoint_root / checkpoint.session_id / checkpoint.id
+        if not checkpoint_dir.exists():
+            raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+
+        await self._save_manifest(checkpoint, checkpoint_dir)
+
     async def restore_checkpoint(
         self,
         checkpoint: Checkpoint,

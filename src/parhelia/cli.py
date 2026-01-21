@@ -897,7 +897,7 @@ def session_review(
         if action == "approve":
             approval = await manager.approve(checkpoint, user=user, reason=reason)
             checkpoint.approval = approval
-            # TODO: Save checkpoint with updated approval
+            await ctx.checkpoint_manager.update_checkpoint(checkpoint)
             click.secho(f"Checkpoint {checkpoint.id} approved", fg="green")
             return
 
@@ -907,7 +907,7 @@ def session_review(
                 return
             approval = await manager.reject(checkpoint, user=user, reason=reason)
             checkpoint.approval = approval
-            # TODO: Save checkpoint with updated approval
+            await ctx.checkpoint_manager.update_checkpoint(checkpoint)
             click.secho(f"Checkpoint {checkpoint.id} rejected", fg="red")
             return
 
