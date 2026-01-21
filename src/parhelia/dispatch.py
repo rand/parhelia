@@ -214,19 +214,25 @@ class TaskDispatcher:
             )
 
     async def _wait_for_ready(self, sandbox: "modal.Sandbox") -> None:
-        """Wait for sandbox to signal readiness."""
+        """Verify sandbox is ready by running a simple health check.
+
+        Note: The original design expected an entrypoint script to create /tmp/ready,
+        but sandboxes don't auto-run entrypoints. We now verify readiness by checking
+        that Claude Code is installed and runnable.
+        """
         from parhelia.modal_app import run_in_sandbox
 
         start = datetime.now()
         while (datetime.now() - start).seconds < self.READY_TIMEOUT_SECONDS:
             try:
-                output = await run_in_sandbox(sandbox, ["cat", "/tmp/ready"])
-                if "PARHELIA_READY" in output:
-                    self._log("Container ready")
+                # Verify Claude Code is available
+                output = await run_in_sandbox(sandbox, [self.CLAUDE_BIN, "--version"])
+                if "Claude Code" in output:
+                    self._log("Container ready (Claude Code verified)")
                     return
             except Exception:
                 pass
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
         raise DispatchError("Sandbox did not become ready in time")
 
@@ -239,11 +245,12 @@ class TaskDispatcher:
         from parhelia.modal_app import run_in_sandbox
 
         # Build Claude command
-        # Use --print for non-interactive mode with prompt
+        # Use -p for non-interactive print mode with prompt
         cmd = [
             self.CLAUDE_BIN,
-            "--print",  # Non-interactive mode
+            "-p",  # Non-interactive print mode
             task.prompt,
+            "--max-turns", "10",  # Reasonable limit for autonomous work
         ]
 
         # Add working directory if specified

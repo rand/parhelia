@@ -182,7 +182,11 @@ async def create_claude_sandbox(
 
     image = gpu_image if gpu else cpu_image
 
+    # Get app reference - required when running outside Modal container
+    parhelia_app = modal.App.lookup("parhelia", create_if_missing=True)
+
     sandbox = await modal.Sandbox.create.aio(
+        app=parhelia_app,
         image=image,
         secrets=PARHELIA_SECRETS,
         volumes={"/vol/parhelia": volume},
@@ -191,25 +195,86 @@ async def create_claude_sandbox(
         cpu=CPU_CONFIG["cpu"],
         memory=CPU_CONFIG["memory"],
         # Pass task_id as environment variable for tracking/logging
-        environment={"PARHELIA_TASK_ID": task_id},
+        env={"PARHELIA_TASK_ID": task_id},
     )
 
     return sandbox
 
 
-async def run_in_sandbox(sandbox: modal.Sandbox, command: list[str]) -> str:
+async def run_in_sandbox(
+    sandbox: modal.Sandbox,
+    command: list[str],
+    timeout_seconds: int = 300,
+) -> str:
     """Execute command in sandbox and return output.
+
+    Uses file-based output capture to avoid Modal stdout streaming issues
+    with long-running processes like Claude Code.
 
     Args:
         sandbox: The Modal Sandbox instance
         command: Command and arguments to execute
+        timeout_seconds: Maximum time to wait for command (default 5 minutes)
 
     Returns:
         stdout from the command
     """
-    process = await sandbox.exec.aio(*command)
-    stdout = await process.stdout.read()
-    return stdout
+    import uuid
+
+    # For simple commands (ls, echo, cat), use direct stdout
+    simple_commands = {"ls", "cat", "echo", "pwd", "env", "whoami", "which", "head", "tail"}
+    if command and command[0].split("/")[-1] in simple_commands:
+        process = await sandbox.exec.aio(*command)
+        stdout_lines = []
+        for line in process.stdout:
+            stdout_lines.append(line)
+        await process.wait.aio()
+        return "".join(stdout_lines)
+
+    # For complex commands (like Claude), use file-based capture with smart polling.
+    # Claude Code in -p mode doesn't always exit cleanly, so we poll for output
+    # stability and return when no new output has been produced for a while.
+    output_file = f"/tmp/parhelia_out_{uuid.uuid4().hex[:8]}.txt"
+    cmd_str = " ".join(f'"{c}"' if " " in c else c for c in command)
+
+    # Bash script that:
+    # 1. Runs command in background
+    # 2. Polls output file size until stable (no change for 5 seconds) or timeout
+    # 3. Kills process and returns output
+    poll_script = f'''
+{cmd_str} > {output_file} 2>&1 &
+PID=$!
+PREV_SIZE=0
+STABLE_COUNT=0
+ELAPSED=0
+while [ $ELAPSED -lt {timeout_seconds} ]; do
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+    if [ -f {output_file} ]; then
+        CURR_SIZE=$(stat -c%s {output_file} 2>/dev/null || stat -f%z {output_file} 2>/dev/null || echo 0)
+        if [ "$CURR_SIZE" = "$PREV_SIZE" ] && [ "$CURR_SIZE" -gt 0 ]; then
+            STABLE_COUNT=$((STABLE_COUNT + 1))
+            if [ $STABLE_COUNT -ge 5 ]; then
+                break
+            fi
+        else
+            STABLE_COUNT=0
+            PREV_SIZE=$CURR_SIZE
+        fi
+    fi
+done
+kill $PID 2>/dev/null
+wait $PID 2>/dev/null
+cat {output_file} 2>/dev/null
+rm -f {output_file}
+'''
+
+    process = await sandbox.exec.aio("bash", "-c", poll_script)
+    stdout_lines = []
+    for line in process.stdout:
+        stdout_lines.append(line)
+    await process.wait.aio()
+    return "".join(stdout_lines)
 
 
 # =============================================================================
