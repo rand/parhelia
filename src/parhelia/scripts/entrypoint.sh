@@ -16,7 +16,7 @@ VOLUME_ROOT="${PARHELIA_VOLUME_ROOT:-/vol/parhelia}"
 VOLUME_CONFIG="${VOLUME_ROOT}/config/claude"
 WORKSPACE_DIR="${VOLUME_ROOT}/workspaces"
 READY_FILE="/tmp/ready"
-CLAUDE_BIN="${CLAUDE_BIN:-/root/.claude/local/claude}"
+CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 
 log() {
     echo "[parhelia-entrypoint] $(date -Iseconds) $*"

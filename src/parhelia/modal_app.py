@@ -90,11 +90,18 @@ cpu_image = (
     .run_commands([
         # Install Bun for plugin tooling
         "curl -fsSL https://bun.sh/install | bash",
-        # Add bun to PATH for subsequent commands
+        # Add bun and local bin to PATH
         "echo 'export BUN_INSTALL=\"$HOME/.bun\"' >> ~/.bashrc",
-        "echo 'export PATH=\"$BUN_INSTALL/bin:$PATH\"' >> ~/.bashrc",
+        "echo 'export PATH=\"$HOME/.local/bin:$BUN_INSTALL/bin:$PATH\"' >> ~/.bashrc",
+        # Create local bin directory
+        "mkdir -p $HOME/.local/bin",
         # Install Claude Code native binary
-        "curl -fsSL https://claude.ai/install.sh | sh || echo 'Claude install may need manual setup'",
+        # The installer downloads and runs 'claude install' which installs to ~/.local/share/claude
+        # and creates a symlink at ~/.local/bin/claude
+        # Note: Must use bash (not sh) as the installer uses bash features
+        "curl -fsSL https://claude.ai/install.sh | bash",
+        # Verify installation
+        "$HOME/.local/bin/claude --version || echo 'Claude Code installation failed'",
     ])
     # Copy entrypoint script into the image (copy=True needed for subsequent run_commands)
     .add_local_file(
@@ -234,18 +241,21 @@ def health_check() -> dict:
         "anthropic_key_set": "ANTHROPIC_API_KEY" in os.environ,
     }
 
-    # Check Claude Code installation
+    # Check Claude Code installation - installed to ~/.local/bin/claude
+    claude_bin = os.path.expanduser("~/.local/bin/claude")
     try:
         claude_check = subprocess.run(
-            ["/root/.claude/local/claude", "--version"],
+            [claude_bin, "--version"],
             capture_output=True,
             text=True,
             timeout=10,
         )
         result["claude_installed"] = claude_check.returncode == 0
         result["claude_version"] = claude_check.stdout.strip()
+        result["claude_path"] = claude_bin
     except Exception as e:
         result["claude_error"] = str(e)
+        result["claude_path"] = claude_bin
 
     return result
 

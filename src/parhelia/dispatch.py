@@ -63,7 +63,7 @@ class TaskDispatcher:
     """
 
     READY_TIMEOUT_SECONDS = 60
-    CLAUDE_BIN = "/root/.claude/local/claude"
+    CLAUDE_BIN = "/root/.local/bin/claude"
 
     def __init__(
         self,
