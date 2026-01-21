@@ -525,26 +525,177 @@ def task_dispatch(
 
 @cli.command()
 @click.argument("session_id")
+@click.option("--info-only", is_flag=True, help="Show connection info without attaching")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_context
-def attach(ctx: CLIContext, session_id: str) -> None:
-    """Attach to a running session via SSH/tmux."""
-    click.echo(f"Attaching to session: {session_id}")
+def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> None:
+    """Attach to a running session via SSH/tmux.
 
-    # Check if session exists
-    worker = ctx.orchestrator.get_worker(session_id)
-    if not worker:
-        click.secho(f"Session not found: {session_id}", fg="red")
-        sys.exit(1)
+    Implements [SPEC-12.10] Interactive Attach.
 
-    if worker.state.value != "running":
-        click.secho(f"Session is not running (status: {worker.state.value})", fg="yellow")
+    Examples:
+        parhelia attach task-abc123
+        parhelia attach task-abc123 --info-only
+    """
+    from parhelia.output_formatter import (
+        ErrorCode,
+        NextAction,
+        OutputFormatter,
+        format_session_not_found,
+    )
+    from parhelia.ssh import AttachmentManager, SSHTunnelManager
 
-    # In a full implementation, this would:
-    # 1. Get SSH connection info from Modal
-    # 2. Start SSH tunnel
-    # 3. Attach to tmux session
-    click.echo("SSH tunnel would be established here...")
-    click.echo(f"tmux attach-session -t {session_id}")
+    formatter = OutputFormatter(json_mode=as_json)
+
+    async def _attach():
+        # Check if session/task exists
+        task = await ctx.orchestrator.get_task(session_id)
+        worker = None
+
+        if task:
+            worker = ctx.orchestrator.worker_store.get_by_task(session_id)
+        else:
+            # Try as worker ID
+            worker = ctx.orchestrator.get_worker(session_id)
+
+        if not worker:
+            click.echo(format_session_not_found(session_id, json_mode=as_json))
+            sys.exit(1)
+
+        # Check worker state
+        if worker.state.value not in ("running", "idle"):
+            if as_json:
+                click.echo(formatter.error(
+                    code=ErrorCode.ATTACH_FAILED,
+                    message=f"Session is not running (status: {worker.state.value})",
+                    details={"session_id": session_id, "state": worker.state.value},
+                ))
+            else:
+                click.secho(f"Session is not running (status: {worker.state.value})", fg="yellow")
+
+                if worker.state.value == "failed":
+                    click.echo("\nTip: Try session recovery:")
+                    click.echo(f"  parhelia session recover {session_id}")
+            sys.exit(1)
+
+        # Get tunnel info from worker metrics
+        # In production, this would come from Modal sandbox.tunnel()
+        tunnel_host = worker.metrics.get("tunnel_host", "localhost")
+        tunnel_port = worker.metrics.get("tunnel_port", 2222)
+        tmux_session = f"ph-{session_id}"
+
+        # Display connection info
+        if not as_json:
+            click.echo(f"\nConnecting to session {session_id}...")
+            click.echo(f"  Container: {worker.target_type}")
+            if worker.created_at:
+                from datetime import datetime
+                elapsed = datetime.now() - worker.created_at
+                minutes = int(elapsed.total_seconds() // 60)
+                click.echo(f"  Running for: {minutes}m")
+            click.echo("")
+
+        # Create attachment manager
+        tunnel_manager = SSHTunnelManager()
+        attachment_manager = AttachmentManager(tunnel_manager)
+
+        # Create tunnel record
+        tunnel = await tunnel_manager.create_tunnel(
+            session_id=session_id,
+            host=tunnel_host,
+            port=tunnel_port,
+        )
+
+        if info_only:
+            # Just show connection info
+            if as_json:
+                click.echo(formatter.success(
+                    data={
+                        "session_id": session_id,
+                        "tunnel": {
+                            "host": tunnel.host,
+                            "port": tunnel.port,
+                            "user": tunnel.user,
+                        },
+                        "ssh_command": " ".join(tunnel.ssh_command),
+                        "tmux_session": tmux_session,
+                    },
+                    message="Connection info",
+                    next_actions=[
+                        NextAction(
+                            action="connect",
+                            description="Connect manually",
+                            command=" ".join(tunnel.ssh_command) + f" -t 'tmux attach -t {tmux_session}'",
+                        ),
+                    ],
+                ))
+            else:
+                click.echo("Connection info:")
+                click.echo(f"  Host: {tunnel.host}")
+                click.echo(f"  Port: {tunnel.port}")
+                click.echo(f"  User: {tunnel.user}")
+                click.echo(f"  tmux session: {tmux_session}")
+                click.echo("")
+                click.echo("Manual connection:")
+                click.echo(f"  {' '.join(tunnel.ssh_command)} -t 'tmux attach -t {tmux_session}'")
+            return
+
+        # Build and execute attach command
+        if not as_json:
+            click.echo("Establishing SSH tunnel...")
+
+        attach_cmd = tunnel_manager.build_attach_command(tunnel, tmux_session)
+
+        if not as_json:
+            click.echo("Attaching to tmux session...")
+            click.secho("[Press Ctrl+B, D to detach]", fg="cyan")
+            click.echo("")
+
+        # Execute SSH with tmux attach
+        import subprocess
+        try:
+            result = subprocess.run(attach_cmd, check=False)
+
+            # After detach, create checkpoint
+            if result.returncode == 0 and not as_json:
+                click.echo("")
+                click.echo("Detached from session.")
+                click.echo("")
+                click.echo("Creating checkpoint...")
+
+                # Trigger checkpoint creation
+                from parhelia.checkpoint import CheckpointTrigger
+                from parhelia.session import Session, SessionState
+
+                session = Session(
+                    id=session_id,
+                    task_id=session_id,
+                    state=SessionState.RUNNING,
+                    working_directory=f"/vol/parhelia/workspaces/{session_id}",
+                )
+
+                try:
+                    cp = await ctx.checkpoint_manager.create_checkpoint(
+                        session=session,
+                        trigger=CheckpointTrigger.DETACH,
+                    )
+                    click.secho(f"  Checkpoint created: {cp.id}", fg="green")
+                except Exception as e:
+                    click.secho(f"  Checkpoint failed: {e}", fg="yellow")
+
+                click.echo("")
+                click.echo("Session continues running in background.")
+                click.echo("")
+                click.echo("Commands:")
+                click.echo(f"  Re-attach:    parhelia attach {session_id}")
+                click.echo(f"  View logs:    parhelia logs {session_id}")
+                click.echo(f"  Kill session: parhelia session kill {session_id}")
+
+        except KeyboardInterrupt:
+            if not as_json:
+                click.echo("\nConnection interrupted.")
+
+    asyncio.run(_attach())
 
 
 # =============================================================================
@@ -554,15 +705,71 @@ def attach(ctx: CLIContext, session_id: str) -> None:
 
 @cli.command()
 @click.argument("session_id")
+@click.option("--no-checkpoint", is_flag=True, help="Skip checkpoint creation")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_context
-def detach(ctx: CLIContext, session_id: str) -> None:
-    """Detach from a session (keeps it running)."""
-    click.echo(f"Detaching from session: {session_id}")
+def detach(ctx: CLIContext, session_id: str, no_checkpoint: bool, as_json: bool) -> None:
+    """Detach from a session (keeps it running).
 
-    # In a full implementation, this would:
-    # 1. Send tmux detach command
-    # 2. Close SSH tunnel
-    click.echo("Session continues running in background.")
+    Implements [SPEC-12.20] Detach with Checkpoint.
+
+    By default, creates a checkpoint when detaching.
+    """
+    from parhelia.output_formatter import OutputFormatter
+
+    formatter = OutputFormatter(json_mode=as_json)
+
+    async def _detach():
+        if not as_json:
+            click.echo(f"Detaching from session: {session_id}")
+
+        checkpoint_id = None
+
+        if not no_checkpoint:
+            if not as_json:
+                click.echo("Creating checkpoint...")
+
+            from parhelia.checkpoint import CheckpointTrigger
+            from parhelia.session import Session, SessionState
+
+            session = Session(
+                id=session_id,
+                task_id=session_id,
+                state=SessionState.RUNNING,
+                working_directory=f"/vol/parhelia/workspaces/{session_id}",
+            )
+
+            try:
+                cp = await ctx.checkpoint_manager.create_checkpoint(
+                    session=session,
+                    trigger=CheckpointTrigger.DETACH,
+                )
+                checkpoint_id = cp.id
+                if not as_json:
+                    click.secho(f"  Checkpoint created: {cp.id}", fg="green")
+            except Exception as e:
+                if not as_json:
+                    click.secho(f"  Checkpoint failed: {e}", fg="yellow")
+
+        if as_json:
+            click.echo(formatter.success(
+                data={
+                    "session_id": session_id,
+                    "status": "detached",
+                    "checkpoint_id": checkpoint_id,
+                },
+                message="Session detached",
+            ))
+        else:
+            click.echo("")
+            click.echo("Session continues running in background.")
+            click.echo("")
+            click.echo("Commands:")
+            click.echo(f"  Re-attach:    parhelia attach {session_id}")
+            click.echo(f"  View logs:    parhelia logs {session_id}")
+            click.echo(f"  Kill session: parhelia session kill {session_id}")
+
+    asyncio.run(_detach())
 
 
 # =============================================================================
@@ -1639,16 +1846,18 @@ def checkpoint_list(ctx: CLIContext, session_id: str | None, limit: int) -> None
     type=click.Choice(["resume", "new", "wait"]),
     help="Recovery action (skip interactive selection)",
 )
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_context
 def session_recover(
     ctx: CLIContext,
     session_id: str,
     from_checkpoint: str | None,
     action: str | None,
+    as_json: bool,
 ) -> None:
     """Interactive recovery wizard for a session.
 
-    Implements [SPEC-07.42].
+    Implements [SPEC-07.42] and [SPEC-12.30].
 
     Handles common recovery scenarios:
     - Resume from failure (crash, timeout)
@@ -1659,8 +1868,12 @@ def session_recover(
         parhelia session recover my-session
         parhelia session recover my-session --from cp-abc123
         parhelia session recover my-session --action resume
+        parhelia session recover my-session --action resume --json
     """
+    from parhelia.output_formatter import ErrorCode, NextAction, OutputFormatter
     from parhelia.recovery import RecoveryAction, RecoveryManager
+
+    formatter = OutputFormatter(json_mode=as_json)
 
     async def _recover():
         manager = RecoveryManager(
@@ -1677,10 +1890,86 @@ def session_recover(
             plan = await manager.plan_failure_recovery(session_id=session_id)
 
         if not plan:
-            click.secho(f"No recovery options found for session: {session_id}", fg="red")
+            if as_json:
+                click.echo(formatter.error(
+                    code=ErrorCode.SESSION_NOT_FOUND,
+                    message=f"No recovery options found for session: {session_id}",
+                    details={"session_id": session_id},
+                ))
+            else:
+                click.secho(f"No recovery options found for session: {session_id}", fg="red")
+            sys.exit(1)
+
+        # JSON mode with --action: execute non-interactively
+        if as_json and action:
+            action_map = {
+                "resume": RecoveryAction.RESUME,
+                "new": RecoveryAction.NEW_SESSION,
+                "wait": RecoveryAction.WAIT_FOR_USER,
+            }
+            selected_action = action_map.get(action)
+
+            result = await manager.execute_failure_recovery(plan, selected_action)
+
+            if result.success:
+                click.echo(formatter.success(
+                    data={
+                        "session_id": session_id,
+                        "action": action,
+                        "new_session_id": result.new_session_id,
+                        "checkpoint_id": plan.current_checkpoint_id,
+                    },
+                    message="Recovery successful",
+                    next_actions=[
+                        NextAction(
+                            action="attach",
+                            description="Attach to recovered session",
+                            command=f"parhelia attach {result.new_session_id or session_id}",
+                        ),
+                    ] if result.new_session_id else [],
+                ))
+            else:
+                click.echo(formatter.error(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=result.error_message or "Recovery failed",
+                    details={
+                        "session_id": session_id,
+                        "action": action,
+                    },
+                ))
+                sys.exit(1)
             return
 
-        # Display plan
+        # JSON mode without --action: return plan options
+        if as_json and not action:
+            click.echo(formatter.success(
+                data={
+                    "session_id": session_id,
+                    "scenario": plan.scenario.value,
+                    "checkpoint_id": plan.current_checkpoint_id,
+                    "recommended_checkpoint_id": plan.recommended_checkpoint_id,
+                    "options": [
+                        {
+                            "action": opt.action.value,
+                            "description": opt.description,
+                            "recommended": opt.recommended,
+                        }
+                        for opt in plan.options
+                    ],
+                },
+                message="Recovery plan available",
+                next_actions=[
+                    NextAction(
+                        action=opt.action.value,
+                        description=opt.description,
+                        command=f"parhelia session recover {session_id} --action {opt.action.value} --json",
+                    )
+                    for opt in plan.options
+                ],
+            ))
+            return
+
+        # Human mode: display plan
         click.echo(manager.format_recovery_plan(plan))
         click.echo()
 
