@@ -383,9 +383,21 @@ def task() -> None:
 @task.command("show")
 @click.argument("task_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--watch", "-w", is_flag=True, help="Watch for status changes")
 @pass_context
-def task_show(ctx: CLIContext, task_id: str, as_json: bool) -> None:
-    """Show detailed information about a task."""
+def task_show(ctx: CLIContext, task_id: str, as_json: bool, watch: bool) -> None:
+    """Show detailed information about a task.
+
+    Use --watch to stream status updates until completion.
+
+    Examples:
+        parhelia task show task-abc123
+        parhelia task show task-abc123 --watch
+        parhelia task show task-abc123 --watch --json
+    """
+    if watch:
+        _watch_task(ctx, task_id, as_json)
+        return
 
     async def _show():
         task = await ctx.orchestrator.get_task(task_id)
@@ -516,6 +528,97 @@ def task_dispatch(
             sys.exit(1)
 
     asyncio.run(_dispatch())
+
+
+def _watch_task(ctx: CLIContext, task_id: str, json_mode: bool) -> None:
+    """Watch a task for status changes.
+
+    Helper function used by task show --watch.
+    """
+    from parhelia.event_stream import EventFormatter, EventStream
+
+    async def _watch():
+        stream = EventStream(ctx.orchestrator)
+        formatter = EventFormatter(json_mode=json_mode)
+
+        if not json_mode:
+            click.echo(f"Watching task {task_id} for status changes...")
+            click.echo("Press Ctrl+C to stop\n")
+
+        try:
+            async for event in stream.watch(task_id=task_id, stop_on_complete=True):
+                click.echo(formatter.format(event))
+        except KeyboardInterrupt:
+            if not json_mode:
+                click.echo("\nStopped watching.")
+
+    asyncio.run(_watch())
+
+
+@task.command("watch")
+@click.argument("task_id", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON lines")
+@click.option(
+    "--status",
+    type=click.Choice(["all", "pending", "running"]),
+    default="running",
+    help="Filter by status when watching all",
+)
+@click.option("--no-heartbeat", is_flag=True, help="Disable heartbeat events")
+@pass_context
+def task_watch(
+    ctx: CLIContext,
+    task_id: str | None,
+    as_json: bool,
+    status: str,
+    no_heartbeat: bool,
+) -> None:
+    """Watch task(s) for real-time status updates.
+
+    Streams events as they occur. Use --json for machine-readable output.
+
+    Implements [SPEC-12.41] Status Watch.
+
+    Examples:
+        parhelia task watch task-abc123          # Watch specific task
+        parhelia task watch                       # Watch all running tasks
+        parhelia task watch --status pending      # Watch all pending tasks
+        parhelia task watch --json               # JSON line output
+    """
+    from parhelia.event_stream import EventFormatter, EventStream
+
+    async def _watch():
+        stream = EventStream(ctx.orchestrator)
+        formatter = EventFormatter(json_mode=as_json)
+        include_heartbeat = not no_heartbeat
+
+        if not as_json:
+            if task_id:
+                click.echo(f"Watching task {task_id}...")
+            else:
+                click.echo(f"Watching {status} tasks...")
+            click.echo("Press Ctrl+C to stop\n")
+
+        try:
+            if task_id:
+                async for event in stream.watch(
+                    task_id=task_id,
+                    include_heartbeat=include_heartbeat,
+                    stop_on_complete=True,
+                ):
+                    click.echo(formatter.format(event))
+            else:
+                status_filter = None if status == "all" else status
+                async for event in stream.watch_all(
+                    status_filter=status_filter,
+                    include_heartbeat=include_heartbeat,
+                ):
+                    click.echo(formatter.format(event))
+        except KeyboardInterrupt:
+            if not as_json:
+                click.echo("\nStopped watching.")
+
+    asyncio.run(_watch())
 
 
 # =============================================================================
