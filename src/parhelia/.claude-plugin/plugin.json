@@ -1,0 +1,23 @@
+{
+  "name": "parhelia",
+  "version": "1.0.0",
+  "description": "Remote Claude Code execution on Modal.com with GPU support, checkpoint/resume, and interactive sessions",
+  "author": {
+    "name": "Parhelia Contributors"
+  },
+  "homepage": "https://github.com/rand/parhelia",
+  "repository": "https://github.com/rand/parhelia",
+  "license": "MIT",
+  "keywords": [
+    "modal",
+    "remote",
+    "containers",
+    "gpu",
+    "checkpoint",
+    "cloud",
+    "distributed",
+    "session-persistence"
+  ],
+  "commands": "./commands",
+  "skills": "../skills"
+}
