@@ -33,7 +33,8 @@ from parhelia.environment import (
     format_environment_diff,
 )
 from parhelia.heartbeat import HeartbeatMonitor
-from parhelia.orchestrator import LocalOrchestrator, Task, TaskRequirements, TaskType
+from parhelia.orchestrator import Task, TaskRequirements, TaskType
+from parhelia.persistence import PersistentOrchestrator
 from parhelia.resume import ResumeManager
 from parhelia.session import Session, SessionState
 
@@ -57,17 +58,17 @@ class CLIContext:
         self.config = load_config(config_path)
 
         # Lazy-loaded components
-        self._orchestrator: LocalOrchestrator | None = None
+        self._orchestrator: PersistentOrchestrator | None = None
         self._checkpoint_manager: CheckpointManager | None = None
         self._resume_manager: ResumeManager | None = None
         self._budget_manager: BudgetManager | None = None
         self._heartbeat_monitor: HeartbeatMonitor | None = None
 
     @property
-    def orchestrator(self) -> LocalOrchestrator:
-        """Get or create orchestrator."""
+    def orchestrator(self) -> PersistentOrchestrator:
+        """Get or create orchestrator with SQLite persistence."""
         if self._orchestrator is None:
-            self._orchestrator = LocalOrchestrator()
+            self._orchestrator = PersistentOrchestrator()
         return self._orchestrator
 
     @property
@@ -185,7 +186,7 @@ def status(ctx: CLIContext) -> None:
 @cli.command("list")
 @click.option(
     "-s", "--status",
-    type=click.Choice(["all", "running", "completed", "failed"]),
+    type=click.Choice(["all", "pending", "running", "completed", "failed"]),
     default="all",
     help="Filter by status",
 )
@@ -193,36 +194,45 @@ def status(ctx: CLIContext) -> None:
     "-n", "--limit",
     type=int,
     default=20,
-    help="Maximum number of sessions to show",
+    help="Maximum number of items to show",
 )
 @pass_context
 def list_sessions(ctx: CLIContext, status: str, limit: int) -> None:
-    """List sessions."""
+    """List tasks and sessions."""
 
     async def _list():
-        # Get sessions from orchestrator
-        workers = await ctx.orchestrator.get_workers()
+        # Get tasks from orchestrator
+        if status == "all":
+            tasks = await ctx.orchestrator.get_all_tasks(limit)
+        elif status == "pending":
+            tasks = await ctx.orchestrator.get_pending_tasks()
+        elif status == "running":
+            tasks = await ctx.orchestrator.get_running_tasks()
+        else:
+            tasks = await ctx.orchestrator.get_all_tasks(limit)
+            tasks = [t for t in tasks if ctx.orchestrator.task_store.get_status(t.id) == status]
 
-        if not workers:
-            click.echo("No active sessions.")
+        if not tasks:
+            click.echo("No tasks found.")
             return
 
         click.echo(f"{'ID':<20} {'Status':<12} {'Type':<12} {'Created':<20}")
         click.echo("-" * 70)
 
-        for worker in workers[:limit]:
+        for task in tasks[:limit]:
+            task_status = ctx.orchestrator.task_store.get_status(task.id) or "unknown"
             status_color = {
-                "idle": "white",
+                "pending": "yellow",
                 "running": "green",
                 "completed": "blue",
                 "failed": "red",
-            }.get(worker.state.value, "white")
+            }.get(task_status, "white")
 
             click.echo(
-                f"{worker.id:<20} "
-                f"{click.style(worker.state.value, fg=status_color):<12} "
-                f"{worker.target_type:<12} "
-                f"{worker.created_at.strftime('%Y-%m-%d %H:%M'):<20}"
+                f"{task.id:<20} "
+                f"{click.style(task_status, fg=status_color):<12} "
+                f"{task.task_type.value:<12} "
+                f"{task.created_at.strftime('%Y-%m-%d %H:%M'):<20}"
             )
 
     asyncio.run(_list())

@@ -118,27 +118,46 @@ class TestStatusCommand:
 class TestListCommand:
     """Tests for list command."""
 
-    def test_list_no_sessions(self, runner, mock_config):
-        """list MUST show message when no sessions."""
+    def test_list_no_sessions(self, runner, mock_config, tmp_path):
+        """list MUST show message when no tasks."""
+        from parhelia.persistence import PersistentOrchestrator
+
         with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["list"])
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                # Use temp database
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["list"])
 
-            assert result.exit_code == 0
-            assert "No active sessions" in result.output
+                assert result.exit_code == 0
+                assert "No tasks found" in result.output
 
-    def test_list_with_status_filter(self, runner, mock_config):
+    def test_list_with_status_filter(self, runner, mock_config, tmp_path):
         """list MUST accept status filter."""
+        from parhelia.persistence import PersistentOrchestrator
+
         with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["list", "-s", "running"])
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["list", "-s", "running"])
 
-            assert result.exit_code == 0
+                assert result.exit_code == 0
 
-    def test_list_with_limit(self, runner, mock_config):
+    def test_list_with_limit(self, runner, mock_config, tmp_path):
         """list MUST accept limit option."""
-        with patch("parhelia.cli.load_config", return_value=mock_config):
-            result = runner.invoke(cli, ["list", "-n", "5"])
+        from parhelia.persistence import PersistentOrchestrator
 
-            assert result.exit_code == 0
+        with patch("parhelia.cli.load_config", return_value=mock_config):
+            with patch("parhelia.cli.PersistentOrchestrator") as mock_orch_cls:
+                mock_orch_cls.return_value = PersistentOrchestrator(
+                    db_path=tmp_path / "test.db"
+                )
+                result = runner.invoke(cli, ["list", "-n", "5"])
+
+                assert result.exit_code == 0
 
 
 # =============================================================================
