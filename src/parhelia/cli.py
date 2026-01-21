@@ -2013,6 +2013,39 @@ def session_recover(
 
 
 # =============================================================================
+# MCP Server Command
+# =============================================================================
+
+
+@cli.command("mcp-server")
+def mcp_server() -> None:
+    """Start Parhelia MCP server for programmatic access.
+
+    Implements [SPEC-11.40] MCP Server.
+
+    The MCP server runs on stdio and exposes Parhelia tools:
+    - parhelia_submit: Submit tasks for execution
+    - parhelia_status: Get task/session status
+    - parhelia_attach_info: Get SSH connection info
+    - parhelia_checkpoint: Manage checkpoints
+    - parhelia_budget: Check budget status
+
+    Add to mcp_config.json:
+        {
+            "mcpServers": {
+                "parhelia": {
+                    "command": "parhelia",
+                    "args": ["mcp-server"]
+                }
+            }
+        }
+    """
+    from parhelia.mcp_server import run_mcp_server
+
+    run_mcp_server()
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 
