@@ -34,6 +34,7 @@ def init_environment(
     skip_claude_check: bool = False,
     skip_tmux: bool = False,
     skip_mcp: bool = False,
+    skip_hooks: bool = False,
 ) -> bool:
     """Initialize the container environment.
 
@@ -41,6 +42,7 @@ def init_environment(
         skip_claude_check: Skip Claude Code verification (for testing)
         skip_tmux: Skip tmux initialization (for testing)
         skip_mcp: Skip MCP server startup
+        skip_hooks: Skip hooks validation
 
     Returns:
         True if initialization succeeded, False otherwise
@@ -54,15 +56,19 @@ def init_environment(
             if not verify_claude_code():
                 return False
 
-        # 3. Start MCP servers
+        # 3. Validate and fix hooks
+        if not skip_hooks:
+            verify_hooks()
+
+        # 4. Start MCP servers
         if not skip_mcp:
             start_mcp_servers()
 
-        # 4. Initialize tmux
+        # 5. Initialize tmux
         if not skip_tmux:
             init_tmux()
 
-        # 5. Signal ready
+        # 6. Signal ready
         signal_ready()
 
         return True
@@ -179,10 +185,55 @@ def init_tmux() -> None:
     log(f"tmux session 'main' created in {workspace}")
 
 
+def verify_hooks() -> bool:
+    """Verify Claude Code hooks are properly configured.
+
+    Validates that hook scripts exist and are executable.
+    Automatically fixes executable permissions if needed.
+
+    Returns:
+        True if all hooks are valid (or no hooks configured)
+    """
+    try:
+        from parhelia.hook_validator import HookValidator
+
+        validator = HookValidator()
+        result = validator.validate()
+
+        if result.hooks_found == 0:
+            log("No Claude hooks configured")
+            return True
+
+        # Log validation result
+        log(f"Hooks validation: {result.summary()}")
+
+        # Report issues
+        for issue in result.issues:
+            if issue.severity == "error":
+                error(f"Hook {issue.hook_type}: {issue.issue}")
+            else:
+                log(f"Hook {issue.hook_type}: {issue.issue}")
+
+        # Auto-fix permissions
+        if not result.all_valid:
+            fixed = validator.fix_permissions()
+            if fixed > 0:
+                log(f"Fixed permissions on {fixed} hook(s)")
+                # Re-validate after fix
+                result = validator.validate()
+                log(f"After fix: {result.summary()}")
+
+        return result.all_valid
+
+    except Exception as e:
+        log(f"Hook validation skipped: {e}")
+        return True
+
+
 def signal_ready() -> None:
     """Signal that the container is ready.
 
-    Implements step 5 of [SPEC-01.13].
+    Implements step 6 of [SPEC-01.13].
     """
     ready_file = Path(READY_FILE_PATH)
     ready_file.write_text("PARHELIA_READY\n")
