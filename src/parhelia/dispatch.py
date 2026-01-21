@@ -214,18 +214,53 @@ class TaskDispatcher:
             )
 
     async def _wait_for_ready(self, sandbox: "modal.Sandbox") -> None:
-        """Verify sandbox is ready by running a simple health check.
+        """Initialize sandbox and verify readiness.
 
-        Note: The original design expected an entrypoint script to create /tmp/ready,
-        but sandboxes don't auto-run entrypoints. We now verify readiness by checking
-        that Claude Code is installed and runnable.
+        Runs the entrypoint script on first use to:
+        - Link Claude config from volume
+        - Verify Claude installation
+        - Start MCP servers (if configured)
+        - Initialize tmux session
+        - Create /tmp/ready marker
+
+        Uses /tmp/parhelia_init marker to avoid re-running on subsequent commands.
         """
         from parhelia.modal_app import run_in_sandbox
 
+        # Check if already initialized
+        try:
+            output = await run_in_sandbox(
+                sandbox, ["test", "-f", "/tmp/parhelia_init", "&&", "echo", "initialized"]
+            )
+            if "initialized" in output:
+                self._log("Sandbox already initialized")
+                return
+        except Exception:
+            pass
+
+        # Run entrypoint script (set PARHELIA_INTERACTIVE=true to avoid tail -f wait)
+        self._log("Running entrypoint initialization...")
+        try:
+            output = await run_in_sandbox(
+                sandbox,
+                ["bash", "-c", "PARHELIA_INTERACTIVE=true /entrypoint.sh && touch /tmp/parhelia_init"],
+                timeout_seconds=30,
+            )
+            self._log("Entrypoint completed")
+        except Exception as e:
+            self._log(f"Entrypoint failed: {e}, falling back to direct verification")
+
+        # Verify readiness - check /tmp/ready or fall back to Claude --version
         start = datetime.now()
         while (datetime.now() - start).seconds < self.READY_TIMEOUT_SECONDS:
             try:
-                # Verify Claude Code is available
+                # First try /tmp/ready (created by entrypoint)
+                output = await run_in_sandbox(sandbox, ["cat", "/tmp/ready"])
+                if "PARHELIA_READY" in output:
+                    self._log("Container ready (entrypoint signaled)")
+                    return
+
+                # Fall back to Claude --version check
                 output = await run_in_sandbox(sandbox, [self.CLAUDE_BIN, "--version"])
                 if "Claude Code" in output:
                     self._log("Container ready (Claude Code verified)")
