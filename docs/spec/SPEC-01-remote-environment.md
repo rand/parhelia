@@ -175,17 +175,19 @@ def run_claude(...):
 
 ### [SPEC-01.13] Environment Initialization
 
-On container start, the init script MUST:
+The init script performs environment setup. It is triggered by the dispatcher on first sandbox use (Modal Sandboxes don't auto-run entrypoints).
+
+The init script MUST:
 
 1. **Symlink config**: `~/.claude -> /vol/parhelia/config/claude`
 2. **Verify Claude Code**: Run `claude --version`
 3. **Start MCP servers**: Launch configured MCP servers from `mcp_config.json`
 4. **Initialize tmux**: Create tmux server with standard session
-5. **Report ready**: Signal readiness to orchestrator
+5. **Report ready**: Write `/tmp/ready` marker file
 
 ```bash
 #!/bin/bash
-# /entrypoint.sh
+# /entrypoint.sh - Called explicitly by dispatcher, not auto-run
 
 set -euo pipefail
 
@@ -204,6 +206,8 @@ tmux new-session -d -s main -c /vol/parhelia/workspaces
 # 5. Signal ready
 echo "PARHELIA_READY" > /tmp/ready
 ```
+
+**Implementation note**: The dispatcher runs this script via `PARHELIA_INTERACTIVE=true /entrypoint.sh` and creates `/tmp/parhelia_init` marker to avoid re-running on subsequent commands within the same sandbox.
 
 ### [SPEC-01.14] Secrets Injection
 
