@@ -3613,17 +3613,18 @@ def doctor(ctx: CLIContext, fix: bool, verbose: bool, as_json: bool) -> None:
         try:
             import subprocess
             result = subprocess.run(
-                ["modal", "token", "show"],
+                ["modal", "app", "list", "--json"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=15
             )
             if result.returncode == 0:
-                check.message = "Modal credentials valid"
+                check.message = "Modal connected"
             else:
                 check.status = "FAIL"
-                check.message = "Modal credentials invalid or expired"
-                check.issues.append("Run 'modal token set' to authenticate")
+                check.message = "Modal connection failed"
+                err = result.stderr.strip() if result.stderr else "Unknown error"
+                check.issues.append(err if err else "Run 'modal token set' to authenticate")
         except FileNotFoundError:
             check.status = "FAIL"
             check.message = "Modal CLI not found"
