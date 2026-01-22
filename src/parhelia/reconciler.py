@@ -112,7 +112,7 @@ class ReconcilerConfig:
     poll_interval_seconds: int = 60
     stale_threshold_seconds: int = 300  # 5 min without heartbeat = stale
     orphan_grace_period_seconds: int = 120  # Wait before marking orphan
-    auto_terminate_orphans: bool = False  # Require manual cleanup by default
+    auto_terminate_orphans: bool = True  # Auto-cleanup orphans to prevent runaway costs
     max_reconcile_batch: int = 100
 
 

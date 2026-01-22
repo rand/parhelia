@@ -378,18 +378,22 @@ class TaskDispatcher:
         # Run Claude Code with the task prompt
         self._log("Starting Claude Code...")
         if mode == DispatchMode.SYNC:
-            # Wait for completion
-            output = await self._run_claude_and_wait(sandbox, task)
-            return DispatchResult(
-                task_id=task.id,
-                worker_id=worker_id,
-                sandbox_id=sandbox_id,
-                success=True,
-                output=output,
-            )
+            # Wait for completion, then terminate sandbox
+            try:
+                output = await self._run_claude_and_wait(sandbox, task)
+                return DispatchResult(
+                    task_id=task.id,
+                    worker_id=worker_id,
+                    sandbox_id=sandbox_id,
+                    success=True,
+                    output=output,
+                )
+            finally:
+                # CRITICAL: Always terminate sandbox to prevent runaway costs
+                await self._terminate_sandbox(sandbox, sandbox_id)
         else:
-            # Fire and forget - start Claude in background
-            asyncio.create_task(self._run_claude_background(sandbox, task, worker_id))
+            # Fire and forget - start Claude in background with sandbox for cleanup
+            asyncio.create_task(self._run_claude_background(sandbox, task, worker_id, sandbox_id))
             return DispatchResult(
                 task_id=task.id,
                 worker_id=worker_id,
@@ -498,11 +502,30 @@ class TaskDispatcher:
 
         return output
 
+    async def _terminate_sandbox(
+        self,
+        sandbox: "modal.Sandbox",
+        sandbox_id: str,
+    ) -> None:
+        """Terminate a Modal sandbox to prevent runaway costs.
+
+        This MUST be called after task completion to avoid leaving sandboxes
+        running until their timeout (potentially hours of GPU costs).
+        """
+        try:
+            self._log(f"Terminating sandbox {sandbox_id}...")
+            await sandbox.terminate.aio()
+            self._log(f"Sandbox {sandbox_id} terminated")
+        except Exception as e:
+            # Log but don't raise - sandbox may already be terminated
+            self._log(f"Warning: Failed to terminate sandbox {sandbox_id}: {e}")
+
     async def _run_claude_background(
         self,
         sandbox: "modal.Sandbox",
         task: Task,
         worker_id: str,
+        sandbox_id: str,
     ) -> None:
         """Run Claude Code in background (async dispatch)."""
         try:
@@ -526,6 +549,9 @@ class TaskDispatcher:
                 exit_code=1,
                 reason=str(e),
             )
+        finally:
+            # CRITICAL: Always terminate sandbox to prevent runaway costs
+            await self._terminate_sandbox(sandbox, sandbox_id)
 
     async def dispatch_pending(
         self,

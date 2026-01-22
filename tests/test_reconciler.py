@@ -669,7 +669,7 @@ class TestReconcilerConfig:
         reconciler = ContainerReconciler(state_store, mock_modal)
 
         assert reconciler.config.poll_interval_seconds == 60
-        assert reconciler.config.auto_terminate_orphans is False
+        assert reconciler.config.auto_terminate_orphans is True  # Default changed to prevent runaway costs
 
     @pytest.mark.asyncio
     async def test_custom_config(self, state_store, mock_modal):
