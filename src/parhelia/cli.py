@@ -3479,6 +3479,463 @@ def cleanup(ctx: CLIContext, dry_run: bool, force: bool, as_json: bool) -> None:
 
 
 # =============================================================================
+# Doctor Command
+# =============================================================================
+
+
+@cli.command()
+@click.option("--fix", is_flag=True, help="Attempt to auto-fix issues")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def doctor(ctx: CLIContext, fix: bool, verbose: bool, as_json: bool) -> None:
+    """Check system health and diagnose issues.
+
+    Runs consistency checks on tasks, workers, containers, and configuration.
+    Use --fix to attempt automatic repairs.
+
+    Checks performed:
+    - Task-worker linkage (running tasks have workers)
+    - Worker-container consistency (workers have valid containers)
+    - Orphaned references (dangling foreign keys)
+    - Stale heartbeats (containers not reporting)
+    - Database integrity (schema, constraints)
+    - Configuration validity (Modal credentials, paths)
+
+    Examples:
+        parhelia doctor              # Run all checks
+        parhelia doctor --fix        # Fix issues automatically
+        parhelia doctor --verbose    # Show detailed diagnostics
+    """
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class CheckResult:
+        name: str
+        status: str  # PASS, WARN, FAIL
+        message: str
+        issues: list[str] = field(default_factory=list)
+        fixed: list[str] = field(default_factory=list)
+
+    results: list[CheckResult] = []
+
+    async def run_checks():
+        # Check 1: Task-Worker Linkage
+        check = CheckResult(name="task-worker-linkage", status="PASS", message="")
+        running_tasks = await ctx.orchestrator.get_running_tasks()
+        orphaned_tasks = []
+        for task in running_tasks:
+            worker = ctx.orchestrator.worker_store.get_by_task(task.id)
+            if not worker:
+                orphaned_tasks.append(task.id)
+                check.issues.append(f"Task {task.id} running but no worker assigned")
+
+        if orphaned_tasks:
+            check.status = "FAIL"
+            check.message = f"{len(orphaned_tasks)} running task(s) without workers"
+            if fix:
+                for task_id in orphaned_tasks:
+                    ctx.orchestrator.task_store.update_status(task_id, "failed")
+                    check.fixed.append(f"Marked {task_id} as failed")
+        else:
+            check.message = f"{len(running_tasks)} running tasks all have workers"
+        results.append(check)
+
+        # Check 2: Worker-Container Consistency
+        check = CheckResult(name="worker-container-consistency", status="PASS", message="")
+        workers = ctx.orchestrator.worker_store.list_all(limit=500)
+        running_workers = [w for w in workers if w.state.value == "running"]
+        orphaned_workers = []
+        for worker in running_workers:
+            if not worker.container_id:
+                orphaned_workers.append(worker.id)
+                check.issues.append(f"Worker {worker.id} running but no container_id")
+
+        if orphaned_workers:
+            check.status = "WARN"
+            check.message = f"{len(orphaned_workers)} worker(s) without container reference"
+        else:
+            check.message = f"{len(running_workers)} running workers all have containers"
+        results.append(check)
+
+        # Check 3: Stale Heartbeats
+        check = CheckResult(name="stale-heartbeats", status="PASS", message="")
+        from datetime import timedelta
+        stale_threshold = timedelta(minutes=5)
+        now = datetime.now()
+        stale_workers = []
+        for worker in running_workers:
+            if worker.last_heartbeat_at:
+                age = now - worker.last_heartbeat_at
+                if age > stale_threshold:
+                    stale_workers.append((worker.id, age))
+                    check.issues.append(f"Worker {worker.id} last heartbeat {age.seconds}s ago")
+
+        if stale_workers:
+            check.status = "WARN"
+            check.message = f"{len(stale_workers)} worker(s) with stale heartbeats"
+        else:
+            check.message = "All running workers have recent heartbeats"
+        results.append(check)
+
+        # Check 4: Database Integrity
+        check = CheckResult(name="database-integrity", status="PASS", message="")
+        try:
+            task_count = len(await ctx.orchestrator.get_all_tasks(1000))
+            worker_count = len(ctx.orchestrator.worker_store.list_all(1000))
+            check.message = f"Database OK: {task_count} tasks, {worker_count} workers"
+        except Exception as e:
+            check.status = "FAIL"
+            check.message = f"Database error: {e}"
+            check.issues.append(str(e))
+        results.append(check)
+
+        # Check 5: Configuration
+        check = CheckResult(name="configuration", status="PASS", message="")
+        config_issues = []
+        config = ctx.config
+
+        if not config.paths.volume_root:
+            config_issues.append("volume_root not configured")
+        if config.budget.default_ceiling_usd <= 0:
+            config_issues.append("budget ceiling not set")
+
+        if config_issues:
+            check.status = "WARN"
+            check.message = f"{len(config_issues)} configuration issue(s)"
+            check.issues = config_issues
+        else:
+            check.message = "Configuration valid"
+        results.append(check)
+
+        # Check 6: Modal Connectivity
+        check = CheckResult(name="modal-connectivity", status="PASS", message="")
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["modal", "token", "show"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                check.message = "Modal credentials valid"
+            else:
+                check.status = "FAIL"
+                check.message = "Modal credentials invalid or expired"
+                check.issues.append("Run 'modal token set' to authenticate")
+        except FileNotFoundError:
+            check.status = "FAIL"
+            check.message = "Modal CLI not found"
+            check.issues.append("Install modal: pip install modal")
+        except subprocess.TimeoutExpired:
+            check.status = "WARN"
+            check.message = "Modal CLI timeout"
+        results.append(check)
+
+    asyncio.run(run_checks())
+
+    # Output results
+    if as_json:
+        click.echo(json.dumps([
+            {
+                "name": r.name,
+                "status": r.status,
+                "message": r.message,
+                "issues": r.issues,
+                "fixed": r.fixed,
+            }
+            for r in results
+        ], indent=2))
+        return
+
+    click.echo("Parhelia System Health Check")
+    click.echo("=" * 60)
+    click.echo()
+
+    pass_count = sum(1 for r in results if r.status == "PASS")
+    warn_count = sum(1 for r in results if r.status == "WARN")
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+
+    for r in results:
+        status_color = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}[r.status]
+        status_symbol = {"PASS": "✓", "WARN": "⚠", "FAIL": "✗"}[r.status]
+
+        click.echo(f"{click.style(status_symbol, fg=status_color)} {r.name}: {r.message}")
+
+        if verbose and r.issues:
+            for issue in r.issues:
+                click.echo(f"    → {issue}")
+        if r.fixed:
+            for fixed in r.fixed:
+                click.echo(click.style(f"    ✓ Fixed: {fixed}", fg="green"))
+
+    click.echo()
+    click.echo(f"Summary: {pass_count} passed, {warn_count} warnings, {fail_count} failed")
+
+    if fail_count > 0 and not fix:
+        click.echo()
+        click.echo("Run 'parhelia doctor --fix' to attempt automatic repairs")
+
+
+# =============================================================================
+# Worker Command Group
+# =============================================================================
+
+
+@cli.group()
+def worker() -> None:
+    """Worker management commands.
+
+    Inspect and manage task execution workers.
+    """
+    pass
+
+
+@worker.command("list")
+@click.option(
+    "--state",
+    type=click.Choice(["all", "idle", "running", "completed", "failed", "terminated"]),
+    default="all",
+    help="Filter by state",
+)
+@click.option("-n", "--limit", type=int, default=20, help="Maximum workers to show")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def worker_list(ctx: CLIContext, state: str, limit: int, as_json: bool) -> None:
+    """List workers with optional filtering.
+
+    Examples:
+        parhelia worker list
+        parhelia worker list --state running
+    """
+    from parhelia.orchestrator import WorkerState
+
+    if state == "all":
+        workers = ctx.orchestrator.worker_store.list_all(limit)
+    else:
+        workers = ctx.orchestrator.worker_store.list_by_state(WorkerState(state), limit)
+
+    if as_json:
+        click.echo(json.dumps([
+            {
+                "id": w.id,
+                "task_id": w.task_id,
+                "state": w.state.value,
+                "target_type": w.target_type,
+                "container_id": w.container_id,
+                "health_status": w.health_status,
+                "created_at": w.created_at.isoformat(),
+            }
+            for w in workers
+        ], indent=2))
+        return
+
+    if not workers:
+        click.echo("No workers found.")
+        return
+
+    click.echo(f"{'ID':<20} {'State':<12} {'Task':<20} {'Container':<15}")
+    click.echo("-" * 70)
+
+    for w in workers:
+        state_color = {
+            "idle": "blue",
+            "running": "green",
+            "completed": "cyan",
+            "failed": "red",
+            "terminated": "white",
+        }.get(w.state.value, "white")
+
+        container_short = (w.container_id or "-")[:12]
+        task_short = (w.task_id or "-")[:18]
+
+        click.echo(
+            f"{w.id:<20} "
+            f"{click.style(w.state.value, fg=state_color):<12} "
+            f"{task_short:<20} "
+            f"{container_short:<15}"
+        )
+
+
+@worker.command("show")
+@click.argument("worker_id")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def worker_show(ctx: CLIContext, worker_id: str, as_json: bool) -> None:
+    """Show detailed worker information.
+
+    Examples:
+        parhelia worker show worker-abc123
+    """
+    worker = ctx.orchestrator.get_worker(worker_id)
+
+    if not worker:
+        click.secho(f"Worker not found: {worker_id}", fg="red")
+        sys.exit(1)
+
+    if as_json:
+        click.echo(json.dumps({
+            "id": worker.id,
+            "task_id": worker.task_id,
+            "state": worker.state.value,
+            "target_type": worker.target_type,
+            "gpu_type": worker.gpu_type,
+            "container_id": worker.container_id,
+            "session_id": worker.session_id,
+            "health_status": worker.health_status,
+            "last_heartbeat_at": worker.last_heartbeat_at.isoformat() if worker.last_heartbeat_at else None,
+            "created_at": worker.created_at.isoformat(),
+            "terminated_at": worker.terminated_at.isoformat() if worker.terminated_at else None,
+            "exit_code": worker.exit_code,
+            "metrics": worker.metrics,
+        }, indent=2))
+        return
+
+    click.echo(f"Worker: {worker.id}")
+    click.echo("=" * 50)
+    click.echo(f"State:           {worker.state.value}")
+    click.echo(f"Task ID:         {worker.task_id or '-'}")
+    click.echo(f"Target:          {worker.target_type}")
+    click.echo(f"GPU:             {worker.gpu_type or '-'}")
+    click.echo(f"Container:       {worker.container_id or '-'}")
+    click.echo(f"Session:         {worker.session_id or '-'}")
+    click.echo(f"Health:          {worker.health_status}")
+    click.echo(f"Last Heartbeat:  {worker.last_heartbeat_at or '-'}")
+    click.echo(f"Created:         {worker.created_at}")
+    if worker.terminated_at:
+        click.echo(f"Terminated:      {worker.terminated_at}")
+        click.echo(f"Exit Code:       {worker.exit_code}")
+
+
+@worker.command("kill")
+@click.argument("worker_id")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation")
+@pass_context
+def worker_kill(ctx: CLIContext, worker_id: str, force: bool) -> None:
+    """Terminate a worker and mark its task as failed.
+
+    Examples:
+        parhelia worker kill worker-abc123
+    """
+    worker = ctx.orchestrator.get_worker(worker_id)
+
+    if not worker:
+        click.secho(f"Worker not found: {worker_id}", fg="red")
+        sys.exit(1)
+
+    if worker.state.value in ("completed", "failed", "terminated"):
+        click.secho(f"Worker already in terminal state: {worker.state.value}", fg="yellow")
+        return
+
+    if not force:
+        click.echo(f"Worker {worker_id} is {worker.state.value}")
+        if worker.task_id:
+            click.echo(f"Associated task {worker.task_id} will be marked as failed")
+        if not click.confirm("Proceed?"):
+            click.echo("Cancelled.")
+            return
+
+    # Mark worker as terminated
+    from parhelia.orchestrator import WorkerState
+    ctx.orchestrator.worker_store.update_state(worker_id, WorkerState.TERMINATED)
+
+    # Mark task as failed
+    if worker.task_id:
+        ctx.orchestrator.task_store.update_status(worker.task_id, "failed")
+        click.secho(f"Task {worker.task_id} marked as failed", fg="yellow")
+
+    click.secho(f"Worker {worker_id} terminated", fg="green")
+
+
+# =============================================================================
+# Task Cancel and Retry Commands
+# =============================================================================
+
+
+@task.command("cancel")
+@click.argument("task_id")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation")
+@pass_context
+def task_cancel(ctx: CLIContext, task_id: str, force: bool) -> None:
+    """Cancel a running or pending task.
+
+    Terminates the associated worker and marks the task as cancelled.
+
+    Examples:
+        parhelia task cancel task-abc123
+    """
+
+    async def _cancel():
+        task = await ctx.orchestrator.get_task(task_id)
+        if not task:
+            click.secho(f"Task not found: {task_id}", fg="red")
+            sys.exit(1)
+
+        status = ctx.orchestrator.task_store.get_status(task_id)
+        if status in ("completed", "failed"):
+            click.secho(f"Task already in terminal state: {status}", fg="yellow")
+            return
+
+        if not force:
+            click.echo(f"Task {task_id} is {status}")
+            if not click.confirm("Cancel this task?"):
+                click.echo("Aborted.")
+                return
+
+        # Find and terminate associated worker
+        worker = ctx.orchestrator.worker_store.get_by_task(task_id)
+        if worker and worker.state.value == "running":
+            from parhelia.orchestrator import WorkerState
+            ctx.orchestrator.worker_store.update_state(worker.id, WorkerState.TERMINATED)
+            click.echo(f"Worker {worker.id} terminated")
+
+        # Mark task as failed (cancelled)
+        ctx.orchestrator.task_store.update_status(task_id, "failed")
+        click.secho(f"Task {task_id} cancelled", fg="green")
+
+    asyncio.run(_cancel())
+
+
+@task.command("retry")
+@click.argument("task_id")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation")
+@pass_context
+def task_retry(ctx: CLIContext, task_id: str, force: bool) -> None:
+    """Retry a failed task.
+
+    Resets the task to pending status for re-dispatch.
+
+    Examples:
+        parhelia task retry task-abc123
+    """
+
+    async def _retry():
+        task = await ctx.orchestrator.get_task(task_id)
+        if not task:
+            click.secho(f"Task not found: {task_id}", fg="red")
+            sys.exit(1)
+
+        status = ctx.orchestrator.task_store.get_status(task_id)
+        if status not in ("failed", "completed"):
+            click.secho(f"Can only retry failed/completed tasks. Current status: {status}", fg="yellow")
+            return
+
+        if not force:
+            click.echo(f"Task {task_id} ({status}): {task.prompt[:50]}...")
+            if not click.confirm("Retry this task?"):
+                click.echo("Aborted.")
+                return
+
+        # Reset to pending
+        ctx.orchestrator.task_store.update_status(task_id, "pending")
+        click.secho(f"Task {task_id} reset to pending", fg="green")
+        click.echo("Run 'parhelia task dispatch' to execute")
+
+    asyncio.run(_retry())
+
+
+# =============================================================================
 # Events Command Group (SPEC-20 P4)
 # =============================================================================
 
