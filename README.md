@@ -10,11 +10,11 @@
 
 ## Why Parhelia?
 
-Local Claude Code sessions hit limits during intensive work—full test suites exhaust memory, large builds max out CPU, GPU workloads require specialized hardware. Network disconnections lose hours of progress.
+Local Claude Code sessions hit limits during intensive work. Full test suites exhaust memory, large builds max out CPU, GPU workloads require specialized hardware. Network disconnections lose hours of progress.
 
-Parhelia solves this by running Claude Code in Modal.com's cloud infrastructure while preserving everything that makes your local setup productive:
+Parhelia runs Claude Code on Modal.com while syncing your local configuration:
 
-- **Your full configuration**: plugins, skills, CLAUDE.md, MCP servers—all synced
+- **Your full configuration**: plugins, skills, CLAUDE.md, MCP servers
 - **Checkpoint/resume**: Sessions survive container restarts and network failures
 - **GPU access**: A10G, A100, H100 for ML workloads
 - **Parallel execution**: Dispatch multiple tasks across workers
@@ -44,7 +44,7 @@ parhelia task create "List the files in /tmp and count them" --sync
 
 ## CLI Commands
 
-Parhelia uses a structured command hierarchy with intuitive aliases:
+Command groups with short aliases:
 
 ### Task Management
 
