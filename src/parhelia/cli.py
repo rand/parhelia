@@ -49,6 +49,12 @@ from typing import Any
 import click
 
 from parhelia.budget import BudgetManager
+from parhelia.feedback import (
+    ErrorRecovery,
+    ProgressSpinner,
+    StatusFormatter,
+    create_spinner,
+)
 from parhelia.checkpoint import CheckpointManager
 from parhelia.config import load_config
 from parhelia.environment import (
@@ -543,38 +549,53 @@ def submit(
     async def _submit_and_dispatch():
         # Always persist the task first
         task_id = await ctx.orchestrator.submit_task(task)
-        click.echo(f"Task submitted: {task_id}")
+        click.echo(StatusFormatter.success(f"Task submitted: {task_id}"))
 
         if not dispatch:
-            ctx.log("Task saved but not dispatched (use --dispatch to run)", "info")
+            click.echo(StatusFormatter.info("Task saved but not dispatched (use --dispatch to run)"))
             return task_id, None
 
         # Dispatch to Modal
         dispatcher = TaskDispatcher(ctx.orchestrator, skip_modal=dry_run)
 
-        def progress(msg: str) -> None:
-            if ctx.verbose or dry_run:
-                click.echo(f"  {msg}")
-
-        dispatcher.set_progress_callback(progress)
-
         mode = DispatchMode.SYNC if sync else DispatchMode.ASYNC
         mode_str = "sync" if sync else "async"
         dry_str = " (dry-run)" if dry_run else ""
 
-        click.echo(f"Dispatching{dry_str} in {mode_str} mode...")
+        # Use spinner for long-running dispatch operation
+        spinner = create_spinner(f"Dispatching{dry_str} in {mode_str} mode...")
 
-        result = await dispatcher.dispatch(task, mode=mode)
+        def progress(msg: str) -> None:
+            spinner.update(msg)
+            if ctx.verbose or dry_run:
+                # Also log to verbose output
+                ctx.log(msg, "info")
+
+        dispatcher.set_progress_callback(progress)
+
+        spinner.start()
+        try:
+            result = await dispatcher.dispatch(task, mode=mode)
+        except Exception as e:
+            spinner.stop(success=False, final_message=f"Dispatch failed: {e}")
+            # Provide recovery suggestions
+            suggestions = ErrorRecovery.suggest("E602", {"task_id": task_id})
+            click.echo(StatusFormatter.error(str(e), suggestions))
+            return task_id, None
+        finally:
+            if spinner._running:
+                spinner.stop(success=True)
 
         if result.success:
-            click.echo(f"Worker started: {result.worker_id}")
+            click.echo(StatusFormatter.success(f"Worker started: {result.worker_id}"))
             if result.sandbox_id:
-                ctx.log(f"Sandbox: {result.sandbox_id}", "info")
+                click.echo(StatusFormatter.info(f"Sandbox: {result.sandbox_id}"))
             if result.output and sync:
                 click.echo("\nOutput:")
                 click.echo(result.output)
         else:
-            click.secho(f"Dispatch failed: {result.error}", fg="red")
+            suggestions = ErrorRecovery.suggest("E602", {"task_id": task_id})
+            click.echo(StatusFormatter.error(f"Dispatch failed: {result.error}", suggestions))
 
         return task_id, result
 
@@ -704,39 +725,67 @@ def task_dispatch(
     async def _dispatch():
         dispatcher = TaskDispatcher(ctx.orchestrator, skip_modal=dry_run)
 
-        def progress(msg: str) -> None:
-            click.echo(f"  {msg}")
-
-        dispatcher.set_progress_callback(progress)
-
         if dispatch_all:
-            click.echo(f"Dispatching up to {limit} pending tasks...")
-            results = await dispatcher.dispatch_pending(limit=limit)
+            spinner = create_spinner(f"Dispatching up to {limit} pending tasks...")
+            spinner.start()
+
+            def progress(msg: str) -> None:
+                spinner.update(msg)
+
+            dispatcher.set_progress_callback(progress)
+
+            try:
+                results = await dispatcher.dispatch_pending(limit=limit)
+                spinner.stop(success=True)
+            except Exception as e:
+                spinner.stop(success=False, final_message=str(e))
+                suggestions = ErrorRecovery.suggest("E602")
+                click.echo(StatusFormatter.error(str(e), suggestions))
+                sys.exit(1)
+
             success = sum(1 for r in results if r.success)
             click.echo(f"\nDispatched {success}/{len(results)} tasks")
             for r in results:
-                status = click.style("ok", fg="green") if r.success else click.style("failed", fg="red")
-                click.echo(f"  {r.task_id}: {status}")
+                if r.success:
+                    click.echo(StatusFormatter.success(f"{r.task_id}: worker {r.worker_id}"))
+                else:
+                    click.echo(StatusFormatter.error(f"{r.task_id}: {r.error}"))
         elif task_id:
             task = await ctx.orchestrator.get_task(task_id)
             if not task:
-                click.secho(f"Task not found: {task_id}", fg="red")
+                suggestions = ErrorRecovery.suggest("E201", {"task_id": task_id})
+                click.echo(StatusFormatter.error(f"Task not found: {task_id}", suggestions))
                 sys.exit(1)
 
             status = ctx.orchestrator.task_store.get_status(task_id)
             if status != "pending":
-                click.secho(f"Task is not pending (status: {status})", fg="yellow")
+                click.echo(StatusFormatter.warning(f"Task is not pending (status: {status})"))
                 return
 
-            click.echo(f"Dispatching task {task_id}...")
-            result = await dispatcher.dispatch(task, mode=DispatchMode.ASYNC)
+            spinner = create_spinner(f"Dispatching task {task_id}...")
+
+            def progress(msg: str) -> None:
+                spinner.update(msg)
+
+            dispatcher.set_progress_callback(progress)
+            spinner.start()
+
+            try:
+                result = await dispatcher.dispatch(task, mode=DispatchMode.ASYNC)
+                spinner.stop(success=result.success)
+            except Exception as e:
+                spinner.stop(success=False, final_message=str(e))
+                suggestions = ErrorRecovery.suggest("E602", {"task_id": task_id})
+                click.echo(StatusFormatter.error(str(e), suggestions))
+                sys.exit(1)
 
             if result.success:
-                click.secho(f"Dispatched: worker {result.worker_id}", fg="green")
+                click.echo(StatusFormatter.success(f"Dispatched: worker {result.worker_id}"))
             else:
-                click.secho(f"Failed: {result.error}", fg="red")
+                suggestions = ErrorRecovery.suggest("E602", {"task_id": task_id})
+                click.echo(StatusFormatter.error(f"Failed: {result.error}", suggestions))
         else:
-            click.echo("Specify a task ID or use --all")
+            click.echo(StatusFormatter.error("Specify a task ID or use --all"))
             sys.exit(1)
 
     asyncio.run(_dispatch())
@@ -874,7 +923,11 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
             worker = ctx.orchestrator.get_worker(session_id)
 
         if not worker:
-            click.echo(format_session_not_found(session_id, json_mode=as_json))
+            if as_json:
+                click.echo(format_session_not_found(session_id, json_mode=as_json))
+            else:
+                suggestions = ErrorRecovery.suggest("E200", {"session_id": session_id})
+                click.echo(StatusFormatter.error(f"Session not found: {session_id}", suggestions))
             sys.exit(1)
 
         # Check worker state
@@ -886,11 +939,13 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
                     details={"session_id": session_id, "state": worker.state.value},
                 ))
             else:
-                click.secho(f"Session is not running (status: {worker.state.value})", fg="yellow")
-
+                suggestions = ErrorRecovery.suggest("E601", {"session_id": session_id})
                 if worker.state.value == "failed":
-                    click.echo("\nTip: Try session recovery:")
-                    click.echo(f"  parhelia session recover {session_id}")
+                    suggestions.insert(0, f"Try session recovery: parhelia session recover {session_id}")
+                click.echo(StatusFormatter.error(
+                    f"Session is not running (status: {worker.state.value})",
+                    suggestions
+                ))
             sys.exit(1)
 
         # Get tunnel info from worker metrics
@@ -956,13 +1011,17 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
             return
 
         # Build and execute attach command
+        spinner = None
         if not as_json:
-            click.echo("Establishing SSH tunnel...")
+            spinner = create_spinner("Establishing SSH tunnel...")
+            spinner.start()
 
         attach_cmd = tunnel_manager.build_attach_command(tunnel, tmux_session)
 
         if not as_json:
-            click.echo("Attaching to tmux session...")
+            if spinner:
+                spinner.stop(success=True, final_message="SSH tunnel established")
+            click.echo(StatusFormatter.info("Attaching to tmux session..."))
             click.secho("[Press Ctrl+B, D to detach]", fg="cyan")
             click.echo("")
 
@@ -974,11 +1033,10 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
             # After detach, create checkpoint
             if result.returncode == 0 and not as_json:
                 click.echo("")
-                click.echo("Detached from session.")
+                click.echo(StatusFormatter.success("Detached from session."))
                 click.echo("")
-                click.echo("Creating checkpoint...")
 
-                # Trigger checkpoint creation
+                # Trigger checkpoint creation with spinner
                 from parhelia.checkpoint import CheckpointTrigger
                 from parhelia.session import Session, SessionState
 
@@ -989,14 +1047,18 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
                     working_directory=f"/vol/parhelia/workspaces/{session_id}",
                 )
 
+                cp_spinner = create_spinner("Creating checkpoint...")
+                cp_spinner.start()
                 try:
                     cp = await ctx.checkpoint_manager.create_checkpoint(
                         session=session,
                         trigger=CheckpointTrigger.DETACH,
                     )
-                    click.secho(f"  Checkpoint created: {cp.id}", fg="green")
+                    cp_spinner.stop(success=True, final_message=f"Checkpoint created: {cp.id}")
                 except Exception as e:
-                    click.secho(f"  Checkpoint failed: {e}", fg="yellow")
+                    cp_spinner.stop(success=False, final_message=f"Checkpoint failed: {e}")
+                    suggestions = ErrorRecovery.suggest("E600", {"session_id": session_id})
+                    click.echo(StatusFormatter.warning(f"Could not create checkpoint: {e}"))
 
                 click.echo("")
                 click.echo("Session continues running in background.")
@@ -1036,14 +1098,11 @@ def detach(ctx: CLIContext, session_id: str, no_checkpoint: bool, as_json: bool)
 
     async def _detach():
         if not as_json:
-            click.echo(f"Detaching from session: {session_id}")
+            click.echo(StatusFormatter.info(f"Detaching from session: {session_id}"))
 
         checkpoint_id = None
 
         if not no_checkpoint:
-            if not as_json:
-                click.echo("Creating checkpoint...")
-
             from parhelia.checkpoint import CheckpointTrigger
             from parhelia.session import Session, SessionState
 
@@ -1054,17 +1113,24 @@ def detach(ctx: CLIContext, session_id: str, no_checkpoint: bool, as_json: bool)
                 working_directory=f"/vol/parhelia/workspaces/{session_id}",
             )
 
+            spinner = None
+            if not as_json:
+                spinner = create_spinner("Creating checkpoint...")
+                spinner.start()
+
             try:
                 cp = await ctx.checkpoint_manager.create_checkpoint(
                     session=session,
                     trigger=CheckpointTrigger.DETACH,
                 )
                 checkpoint_id = cp.id
-                if not as_json:
-                    click.secho(f"  Checkpoint created: {cp.id}", fg="green")
+                if spinner:
+                    spinner.stop(success=True, final_message=f"Checkpoint created: {cp.id}")
             except Exception as e:
-                if not as_json:
-                    click.secho(f"  Checkpoint failed: {e}", fg="yellow")
+                if spinner:
+                    spinner.stop(success=False, final_message=f"Checkpoint failed: {e}")
+                elif not as_json:
+                    click.echo(StatusFormatter.warning(f"Checkpoint failed: {e}"))
 
         if as_json:
             click.echo(formatter.success(
