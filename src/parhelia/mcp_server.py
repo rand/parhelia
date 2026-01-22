@@ -111,7 +111,7 @@ class ParheliaMCPServer:
         self.orchestrator = PersistentOrchestrator()
         self.budget_manager = BudgetManager(ceiling_usd=self.config.budget.default_ceiling_usd)
         self.checkpoint_manager = CheckpointManager(
-            storage_root=self.config.paths.volume_root + "/checkpoints"
+            checkpoint_root=self.config.paths.volume_root + "/checkpoints"
         )
 
         # Initialize comprehensive MCP tools

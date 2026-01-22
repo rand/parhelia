@@ -214,12 +214,20 @@ Parhelia maintains a local control plane that tracks:
 
 ### MCP Integration
 
-Parhelia exposes 24 MCP tools for programmatic access:
+Parhelia exposes 24 MCP tools for programmatic access. To use with Claude Code, add to your `~/.claude/mcp_config.json`:
 
-```bash
-# Start MCP server
-parhelia mcp-server
+```json
+{
+  "mcpServers": {
+    "parhelia": {
+      "command": "parhelia",
+      "args": ["mcp-server"]
+    }
+  }
+}
 ```
+
+See `examples/mcp_config.json` for a complete example.
 
 Tools include:
 - `parhelia_task_create`, `parhelia_task_list`, `parhelia_task_show`
@@ -235,7 +243,7 @@ Tools include:
 
 ### Local Configuration
 
-Create `.parhelia/config.toml`:
+Create `.parhelia/config.toml` (see `examples/config.toml`):
 
 ```toml
 [modal]

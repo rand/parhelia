@@ -1,0 +1,21 @@
+# Parhelia configuration
+# Copy to .parhelia/config.toml in your project root
+
+[modal]
+volume_name = "parhelia-data"
+cpu_count = 4
+memory_mb = 16384
+default_timeout_hours = 4
+
+[budget]
+default_ceiling_usd = 50.0
+warning_threshold_percent = 80
+
+[orchestrator]
+db_path = ".parhelia/orchestrator.db"
+max_concurrent_workers = 10
+
+[reconciler]
+poll_interval_seconds = 60
+stale_threshold_seconds = 300
+auto_terminate_orphans = false
