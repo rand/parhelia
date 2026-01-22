@@ -572,8 +572,8 @@ def submit(
     Use --dry-run to test without Modal.
     Use --automated for headless/CI execution (skips permission prompts).
 
-    Smart defaults: GPU type, memory, and workspace are remembered from
-    previous invocations and used as defaults for future tasks.
+    Smart defaults: Memory and workspace are remembered from previous
+    invocations. GPU must be explicitly requested each time (--gpu).
     """
     import uuid
 
@@ -583,13 +583,8 @@ def submit(
     smart_prompt = get_smart_prompt()
 
     # Use cached values if user didn't explicitly provide them
-    # GPU: use cached if user didn't change from default
-    if gpu == "none":
-        cached_gpu = smart_prompt.get_default("gpu_type")
-        if cached_gpu and cached_gpu != "none":
-            # Show that we're using a cached value
-            click.echo(StatusFormatter.info(f"Using cached GPU: {cached_gpu} (override with --gpu)"))
-            gpu = cached_gpu
+    # NOTE: GPU is intentionally NOT cached - GPUs are expensive and should
+    # only be used when explicitly requested via --gpu flag.
 
     # Memory: use cached if user used default (4)
     if memory == 4:
@@ -604,8 +599,7 @@ def submit(
                 pass
 
     # Remember current values for next time (only if non-default)
-    if gpu != "none":
-        smart_prompt.remember("gpu_type", gpu)
+    # NOTE: GPU is intentionally NOT remembered - must be explicit each time
     if memory != 4:
         smart_prompt.remember("memory_gb", str(memory))
     if workspace:
