@@ -94,7 +94,7 @@ class TaskResult:
 class WorkerInfo:
     """Information about a worker.
 
-    Implements [SPEC-05.12].
+    Implements [SPEC-05.12] and [SPEC-21.13].
     """
 
     id: str
@@ -104,6 +104,14 @@ class WorkerInfo:
     created_at: datetime = field(default_factory=datetime.now)
     gpu_type: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
+
+    # SPEC-21.13 extensions for control plane state
+    container_id: str | None = None  # Link to containers table
+    session_id: str | None = None
+    last_heartbeat_at: datetime | None = None
+    health_status: str = "unknown"  # healthy, degraded, unhealthy, dead
+    terminated_at: datetime | None = None
+    exit_code: int | None = None
 
 
 class LocalOrchestrator:

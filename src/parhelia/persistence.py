@@ -341,6 +341,44 @@ class WorkerStore:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_workers_task ON workers(task_id)
             """)
+            # Run migrations for new columns [SPEC-21.13]
+            self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Apply schema migrations for SPEC-21 control plane columns."""
+        # Get existing columns
+        cursor = conn.execute("PRAGMA table_info(workers)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        # New columns for SPEC-21.13
+        migrations = [
+            ("container_id", "TEXT"),
+            ("session_id", "TEXT"),
+            ("last_heartbeat_at", "TEXT"),
+            ("health_status", "TEXT DEFAULT 'unknown'"),
+            ("terminated_at", "TEXT"),
+            ("exit_code", "INTEGER"),
+        ]
+
+        for column_name, column_type in migrations:
+            if column_name not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE workers ADD COLUMN {column_name} {column_type}"
+                )
+
+        # Add new indexes
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_workers_container
+            ON workers(container_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_workers_session
+            ON workers(session_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_workers_health
+            ON workers(health_status)
+        """)
 
     def save(self, worker: WorkerInfo) -> None:
         """Save a worker to the store.
@@ -352,8 +390,9 @@ class WorkerStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO workers
-                (id, task_id, state, target_type, created_at, gpu_type, metrics, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, task_id, state, target_type, created_at, gpu_type, metrics, updated_at,
+                 container_id, session_id, last_heartbeat_at, health_status, terminated_at, exit_code)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     worker.id,
@@ -364,6 +403,12 @@ class WorkerStore:
                     worker.gpu_type,
                     json.dumps(worker.metrics),
                     datetime.now().isoformat(),
+                    worker.container_id,
+                    worker.session_id,
+                    worker.last_heartbeat_at.isoformat() if worker.last_heartbeat_at else None,
+                    worker.health_status,
+                    worker.terminated_at.isoformat() if worker.terminated_at else None,
+                    worker.exit_code,
                 ),
             )
 
@@ -512,6 +557,15 @@ class WorkerStore:
 
     def _row_to_worker(self, row: sqlite3.Row) -> WorkerInfo:
         """Convert database row to WorkerInfo."""
+        # Check which columns exist (for backwards compatibility with old DBs)
+        columns = row.keys()
+
+        # Helper to safely get nullable datetime fields
+        def get_datetime(col: str) -> datetime | None:
+            if col in columns and row[col]:
+                return datetime.fromisoformat(row[col])
+            return None
+
         return WorkerInfo(
             id=row["id"],
             task_id=row["task_id"],
@@ -520,6 +574,13 @@ class WorkerStore:
             created_at=datetime.fromisoformat(row["created_at"]),
             gpu_type=row["gpu_type"],
             metrics=json.loads(row["metrics"]),
+            # SPEC-21.13 extensions
+            container_id=row["container_id"] if "container_id" in columns else None,
+            session_id=row["session_id"] if "session_id" in columns else None,
+            last_heartbeat_at=get_datetime("last_heartbeat_at"),
+            health_status=row["health_status"] if "health_status" in columns else "unknown",
+            terminated_at=get_datetime("terminated_at"),
+            exit_code=row["exit_code"] if "exit_code" in columns else None,
         )
 
 
