@@ -156,7 +156,7 @@ class ParheliaMCPTools:
             ceiling_usd=config.budget.default_ceiling_usd
         )
         self.checkpoint_manager = checkpoint_manager or CheckpointManager(
-            storage_root=config.paths.volume_root + "/checkpoints"
+            checkpoint_root=config.paths.volume_root + "/checkpoints"
         )
         self.reconciler = ContainerReconciler(
             state_store=self.state_store,
@@ -811,10 +811,17 @@ class ParheliaMCPTools:
         fields: list[str] | None = None,
     ) -> dict[str, Any]:
         """Handle parhelia_task_list tool call."""
-        tasks = await self.orchestrator.list_tasks(
-            status=status if status != "all" else None,
-            limit=limit,
-        )
+        if status == "all":
+            tasks = await self.orchestrator.get_all_tasks(limit)
+        elif status == "pending":
+            tasks = await self.orchestrator.get_pending_tasks()
+            tasks = tasks[:limit]
+        elif status == "running":
+            tasks = await self.orchestrator.get_running_tasks()
+            tasks = tasks[:limit]
+        else:
+            # Use task_store directly for other statuses
+            tasks = self.orchestrator.task_store.list_by_status(status, limit)
 
         task_data = []
         for t in tasks:
@@ -1027,7 +1034,7 @@ class ParheliaMCPTools:
     ) -> dict[str, Any]:
         """Handle parhelia_session_list tool call."""
         # Sessions are workers with active tasks
-        workers = self.orchestrator.worker_store.get_all()
+        workers = self.orchestrator.worker_store.list_all()
 
         if state != "all":
             workers = [w for w in workers if w.state.value == state]
@@ -1038,7 +1045,7 @@ class ParheliaMCPTools:
         for w in workers:
             item = {
                 "session_id": w.id,
-                "task_id": w.assigned_task_id,
+                "task_id": w.task_id,
                 "state": w.state.value,
                 "target_type": w.target_type,
                 "created_at": w.created_at.isoformat() if w.created_at else None,
@@ -1104,7 +1111,7 @@ class ParheliaMCPTools:
             }
 
         # Find associated container
-        containers = self.state_store.get_containers_for_task(worker.assigned_task_id or session_id)
+        containers = self.state_store.get_containers_for_task(worker.task_id or session_id)
 
         try:
             # Terminate containers

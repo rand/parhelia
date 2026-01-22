@@ -258,12 +258,16 @@ class TestAttachCommand:
     def test_attach_not_found_json(self, runner, mock_config):
         """attach MUST return JSON error when session not found."""
         import json
+        import re
 
         with patch("parhelia.cli.load_config", return_value=mock_config):
             result = runner.invoke(cli, ["attach", "nonexistent", "--json"])
 
             assert result.exit_code == 1
-            parsed = json.loads(result.output)
+            # Extract JSON from output (may include deprecation warning)
+            json_match = re.search(r'\{.*\}', result.output, re.DOTALL)
+            assert json_match, f"No JSON found in output: {result.output}"
+            parsed = json.loads(json_match.group())
             assert parsed["success"] is False
             assert parsed["error"]["code"] == "SESSION_NOT_FOUND"
 
@@ -314,6 +318,7 @@ class TestAttachCommand:
     def test_attach_info_only_json(self, runner, mock_config):
         """attach --info-only --json MUST return structured connection info."""
         import json
+        import re
         from parhelia.orchestrator import WorkerInfo, WorkerState
 
         mock_worker = WorkerInfo(
@@ -332,7 +337,10 @@ class TestAttachCommand:
                 result = runner.invoke(cli, ["attach", "task-1", "--info-only", "--json"])
 
                 assert result.exit_code == 0
-                parsed = json.loads(result.output)
+                # Extract JSON from output (may include deprecation warning)
+                json_match = re.search(r'\{.*\}', result.output, re.DOTALL)
+                assert json_match, f"No JSON found in output: {result.output}"
+                parsed = json.loads(json_match.group())
                 assert parsed["success"] is True
                 assert "tunnel" in parsed["data"]
                 assert "ssh_command" in parsed["data"]
@@ -389,6 +397,7 @@ class TestDetachCommand:
     def test_detach_json_output(self, runner, mock_config):
         """detach --json MUST return structured response."""
         import json
+        import re
         from parhelia.session import Checkpoint, CheckpointTrigger
 
         mock_checkpoint = Checkpoint(
@@ -406,7 +415,10 @@ class TestDetachCommand:
                 result = runner.invoke(cli, ["detach", "session-1", "--json"])
 
                 assert result.exit_code == 0
-                parsed = json.loads(result.output)
+                # Extract JSON from output (may include deprecation warning)
+                json_match = re.search(r'\{.*\}', result.output, re.DOTALL)
+                assert json_match, f"No JSON found in output: {result.output}"
+                parsed = json.loads(json_match.group())
                 assert parsed["success"] is True
                 assert parsed["data"]["session_id"] == "session-1"
                 assert parsed["data"]["status"] == "detached"
@@ -415,12 +427,16 @@ class TestDetachCommand:
     def test_detach_json_no_checkpoint(self, runner, mock_config):
         """detach --json --no-checkpoint MUST return null checkpoint_id."""
         import json
+        import re
 
         with patch("parhelia.cli.load_config", return_value=mock_config):
             result = runner.invoke(cli, ["detach", "session-1", "--json", "--no-checkpoint"])
 
             assert result.exit_code == 0
-            parsed = json.loads(result.output)
+            # Extract JSON from output (may include deprecation warning)
+            json_match = re.search(r'\{.*\}', result.output, re.DOTALL)
+            assert json_match, f"No JSON found in output: {result.output}"
+            parsed = json.loads(json_match.group())
             assert parsed["success"] is True
             assert parsed["data"]["checkpoint_id"] is None
 
