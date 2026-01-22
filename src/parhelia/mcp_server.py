@@ -3,7 +3,13 @@
 Implements [SPEC-11.40] MCP Server, [SPEC-21.60] MCP Integration,
 and [SPEC-20.30] Agent Excellence.
 
-Exposes 15+ MCP tools for Claude Code and other agents:
+Exposes 15+ MCP tools for Claude Code and other agents with secure authentication.
+
+Security:
+- Token-based authentication (Bearer tokens)
+- Scope-based authorization (read/write/admin/budget)
+- Audit logging of all tool calls
+- HTTP transport with proper auth headers
 
 Container tools:
 - parhelia_containers: List containers with optional filters
@@ -37,7 +43,16 @@ Budget tools:
 - parhelia_budget_estimate: Estimate cost for task
 
 Usage:
-    parhelia mcp-server  # Start MCP server on stdio
+    # Local stdio (no auth required by default)
+    parhelia mcp-server
+
+    # HTTP with auth
+    parhelia mcp-server --transport http --port 8080
+
+    # Environment variables for auth:
+    PARHELIA_AUTH_TOKENS=token1,token2  # Valid tokens
+    PARHELIA_AUTH_REQUIRED=true         # Require auth
+    PARHELIA_AUDIT_LOG=/path/to/audit.jsonl  # Audit log path
 """
 
 from __future__ import annotations
@@ -49,6 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Coroutine
 
+from parhelia.auth import AuthManager, AuthenticationError, AuthorizationError
 from parhelia.budget import BudgetManager
 from parhelia.checkpoint import CheckpointManager
 from parhelia.config import load_config
@@ -99,20 +115,29 @@ class MCPResponse:
 class ParheliaMCPServer:
     """MCP server exposing Parhelia functionality.
 
-    Implements JSON-RPC 2.0 over stdio for MCP protocol.
+    Implements JSON-RPC 2.0 over stdio or HTTP for MCP protocol.
+    Includes token-based authentication and audit logging.
 
     Provides 15+ tools for control plane introspection and task management.
     See module docstring for full tool list.
     """
 
-    def __init__(self):
-        """Initialize the MCP server."""
+    def __init__(self, require_auth: bool | None = None):
+        """Initialize the MCP server.
+
+        Args:
+            require_auth: Whether to require authentication. If None, uses
+                         PARHELIA_AUTH_REQUIRED env var (default: False for stdio).
+        """
         self.config = load_config()
         self.orchestrator = PersistentOrchestrator()
         self.budget_manager = BudgetManager(ceiling_usd=self.config.budget.default_ceiling_usd)
         self.checkpoint_manager = CheckpointManager(
             checkpoint_root=self.config.paths.volume_root + "/checkpoints"
         )
+
+        # Initialize auth manager
+        self.auth = AuthManager(require_auth=require_auth)
 
         # Initialize comprehensive MCP tools
         self.mcp_tools = ParheliaMCPTools(
@@ -124,6 +149,9 @@ class ParheliaMCPServer:
         # Legacy tools dict for backward compatibility
         self.tools: dict[str, MCPTool] = {}
         self._register_tools()
+
+        # Track current auth token for request context
+        self._current_token: str | None = None
 
     def _register_tools(self) -> None:
         """Register all MCP tools."""
@@ -432,8 +460,22 @@ class ParheliaMCPServer:
             "warning": "Budget running low" if status.warning_threshold_reached else None,
         }
 
-    async def handle_request(self, request: MCPRequest) -> MCPResponse:
-        """Handle an incoming MCP request."""
+    async def handle_request(self, request: MCPRequest, token: str | None = None) -> MCPResponse:
+        """Handle an incoming MCP request with authentication.
+
+        Args:
+            request: The MCP request
+            token: Optional auth token (from header or params)
+
+        Returns:
+            MCP response
+        """
+        import time
+        start_time = time.time()
+
+        # Store token for this request context
+        self._current_token = token
+
         if request.method == "initialize":
             return MCPResponse(
                 id=request.id,
@@ -472,9 +514,33 @@ class ParheliaMCPServer:
             tool_name = request.params.get("name")
             tool_args = request.params.get("arguments", {})
 
+            # Authenticate and authorize
+            try:
+                auth_token = self.auth.check_tool_auth(token, tool_name)
+            except AuthenticationError as e:
+                self.auth.log_request(tool_name, None, False, str(e))
+                return MCPResponse(
+                    id=request.id,
+                    error={
+                        "code": -32001,  # Auth error
+                        "message": f"Authentication failed: {e}",
+                    },
+                )
+            except AuthorizationError as e:
+                self.auth.log_request(tool_name, None, False, str(e))
+                return MCPResponse(
+                    id=request.id,
+                    error={
+                        "code": -32002,  # Authz error
+                        "message": f"Authorization failed: {e}",
+                    },
+                )
+
             # Try new tools first
             try:
                 result = await self.mcp_tools.call_tool(tool_name, tool_args)
+                duration_ms = (time.time() - start_time) * 1000
+                self.auth.log_request(tool_name, auth_token, True, duration_ms=duration_ms)
                 return MCPResponse(
                     id=request.id,
                     result={
@@ -490,6 +556,8 @@ class ParheliaMCPServer:
                 # Tool not found in new tools, try legacy
                 pass
             except Exception as e:
+                duration_ms = (time.time() - start_time) * 1000
+                self.auth.log_request(tool_name, auth_token, False, str(e), duration_ms)
                 return MCPResponse(
                     id=request.id,
                     error={
@@ -502,6 +570,8 @@ class ParheliaMCPServer:
             if tool_name in self.tools:
                 try:
                     result = await self.tools[tool_name].handler(**tool_args)
+                    duration_ms = (time.time() - start_time) * 1000
+                    self.auth.log_request(tool_name, auth_token, True, duration_ms=duration_ms)
                     return MCPResponse(
                         id=request.id,
                         result={
@@ -514,6 +584,8 @@ class ParheliaMCPServer:
                         },
                     )
                 except Exception as e:
+                    duration_ms = (time.time() - start_time) * 1000
+                    self.auth.log_request(tool_name, auth_token, False, str(e), duration_ms)
                     return MCPResponse(
                         id=request.id,
                         error={
@@ -522,6 +594,7 @@ class ParheliaMCPServer:
                         },
                     )
 
+            self.auth.log_request(tool_name, auth_token, False, "Unknown tool")
             return MCPResponse(
                 id=request.id,
                 error={
@@ -539,7 +612,23 @@ class ParheliaMCPServer:
         )
 
     async def run(self) -> None:
-        """Run the MCP server on stdio."""
+        """Run the MCP server on stdio.
+
+        For stdio transport, authentication is validated once at startup using
+        the PARHELIA_MCP_TOKEN environment variable if auth is required.
+        """
+        import os
+
+        # For stdio, validate token once at startup if auth required
+        stdio_token = os.environ.get("PARHELIA_MCP_TOKEN")
+        if self.auth.require_auth:
+            try:
+                self.auth.check_auth(stdio_token)
+            except AuthenticationError as e:
+                sys.stderr.write(f"Authentication failed: {e}\n")
+                sys.stderr.write("Set PARHELIA_MCP_TOKEN environment variable with a valid token\n")
+                sys.exit(1)
+
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
@@ -563,7 +652,8 @@ class ParheliaMCPServer:
                     params=request_data.get("params", {}),
                 )
 
-                response = await self.handle_request(request)
+                # Pass stdio token for each request
+                response = await self.handle_request(request, stdio_token)
                 response_json = json.dumps(response.to_dict()) + "\n"
                 writer.write(response_json.encode())
                 await writer.drain()
@@ -578,10 +668,88 @@ class ParheliaMCPServer:
                 await writer.drain()
 
 
-def run_mcp_server() -> None:
-    """Entry point for MCP server."""
-    server = ParheliaMCPServer()
-    asyncio.run(server.run())
+async def run_http_server(server: ParheliaMCPServer, host: str, port: int) -> None:
+    """Run MCP server over HTTP with authentication.
+
+    Args:
+        server: The MCP server instance
+        host: Host to bind to
+        port: Port to listen on
+    """
+    from aiohttp import web
+
+    async def handle_mcp(request: web.Request) -> web.Response:
+        """Handle MCP request over HTTP."""
+        # Extract auth token from header
+        auth_header = request.headers.get("Authorization", "")
+        token = None
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+
+        try:
+            body = await request.json()
+            mcp_request = MCPRequest(
+                jsonrpc=body.get("jsonrpc", "2.0"),
+                id=body.get("id"),
+                method=body.get("method", ""),
+                params=body.get("params", {}),
+            )
+
+            response = await server.handle_request(mcp_request, token)
+            return web.json_response(response.to_dict())
+
+        except json.JSONDecodeError:
+            return web.json_response(
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
+                status=400,
+            )
+
+    async def handle_health(request: web.Request) -> web.Response:
+        """Health check endpoint."""
+        return web.json_response({"status": "ok", "auth_enabled": server.auth.is_auth_enabled})
+
+    app = web.Application()
+    app.router.add_post("/mcp", handle_mcp)
+    app.router.add_get("/health", handle_health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+
+    print(f"MCP server listening on http://{host}:{port}")
+    print(f"Auth enabled: {server.auth.is_auth_enabled}")
+    if server.auth.is_auth_enabled:
+        print("Set Authorization: Bearer <token> header for authenticated requests")
+
+    # Keep running
+    await asyncio.Event().wait()
+
+
+def run_mcp_server(
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    require_auth: bool | None = None,
+) -> None:
+    """Entry point for MCP server.
+
+    Args:
+        transport: Transport type ("stdio" or "http")
+        host: Host for HTTP transport
+        port: Port for HTTP transport
+        require_auth: Require authentication (default: True for HTTP, False for stdio)
+    """
+    # Default to requiring auth for HTTP
+    if require_auth is None:
+        require_auth = transport == "http"
+
+    server = ParheliaMCPServer(require_auth=require_auth)
+
+    if transport == "http":
+        asyncio.run(run_http_server(server, host, port))
+    else:
+        asyncio.run(server.run())
 
 
 if __name__ == "__main__":

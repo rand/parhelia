@@ -3327,19 +3327,35 @@ def session_recover(
 
 
 @cli.command("mcp-server")
-def mcp_server() -> None:
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "http"]),
+    default="stdio",
+    help="Transport type (default: stdio)",
+)
+@click.option("--host", default="127.0.0.1", help="Host for HTTP transport")
+@click.option("--port", default=8080, type=int, help="Port for HTTP transport")
+@click.option("--require-auth", is_flag=True, help="Require authentication (default for HTTP)")
+@click.option("--no-auth", is_flag=True, help="Disable authentication")
+def mcp_server(transport: str, host: str, port: int, require_auth: bool, no_auth: bool) -> None:
     """Start Parhelia MCP server for programmatic access.
 
-    Implements [SPEC-11.40] MCP Server.
+    Implements [SPEC-11.40] MCP Server with secure authentication.
 
-    The MCP server runs on stdio and exposes Parhelia tools:
-    - parhelia_submit: Submit tasks for execution
-    - parhelia_status: Get task/session status
-    - parhelia_attach_info: Get SSH connection info
-    - parhelia_checkpoint: Manage checkpoints
-    - parhelia_budget: Check budget status
+    Transport modes:
+    - stdio: For Claude Code integration (default, no auth required)
+    - http: For remote access (auth required by default)
 
-    Add to mcp_config.json:
+    Authentication:
+    - Set PARHELIA_AUTH_TOKENS env var with comma-separated tokens
+    - For HTTP: Include "Authorization: Bearer <token>" header
+
+    Examples:
+        parhelia mcp-server                    # stdio for Claude Code
+        parhelia mcp-server --transport http   # HTTP with auth
+        parhelia mcp-server --transport http --no-auth  # HTTP without auth (dev only)
+
+    Add to ~/.claude/mcp_config.json for Claude Code:
         {
             "mcpServers": {
                 "parhelia": {
@@ -3351,7 +3367,14 @@ def mcp_server() -> None:
     """
     from parhelia.mcp_server import run_mcp_server
 
-    run_mcp_server()
+    # Determine auth requirement
+    auth_required = None
+    if require_auth:
+        auth_required = True
+    elif no_auth:
+        auth_required = False
+
+    run_mcp_server(transport=transport, host=host, port=port, require_auth=auth_required)
 
 
 # =============================================================================
