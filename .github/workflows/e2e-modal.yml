@@ -80,6 +80,23 @@ jobs:
         run: |
           uv run python scripts/e2e_modal_tests.py --level ${{ steps.level.outputs.level }}
 
+      - name: Cleanup stale containers
+        if: always()
+        run: |
+          echo "Checking for stale containers..."
+          CONTAINERS=$(uv run modal container list 2>/dev/null | grep -oE 'ta-[A-Za-z0-9]+' | head -20 || true)
+          if [ -n "$CONTAINERS" ]; then
+            echo "Found containers to clean up:"
+            for id in $CONTAINERS; do
+              # Get full ID by listing again with wider output
+              FULL_ID=$(COLUMNS=200 uv run modal container list 2>/dev/null | grep "$id" | awk '{print $1}' || echo "$id")
+              echo "  Stopping $FULL_ID..."
+              uv run modal container stop "$FULL_ID" 2>/dev/null || true
+            done
+          else
+            echo "No stale containers found"
+          fi
+
       - name: Create test summary
         if: always()
         run: |

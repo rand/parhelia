@@ -36,13 +36,31 @@ class TestResult:
 class E2ETestRunner:
     """Runs E2E tests against Modal."""
 
+    # Short timeout for E2E tests (10 minutes) to prevent runaway costs
+    E2E_TIMEOUT_HOURS = 0.17  # ~10 minutes
+
     def __init__(self, level: str = "core"):
         self.level = level
         self.results: list[TestResult] = []
+        self._sandboxes: list = []  # Track created sandboxes for cleanup
 
     def log(self, msg: str) -> None:
         """Print with timestamp."""
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    async def cleanup_sandboxes(self) -> None:
+        """Terminate all sandboxes created during tests."""
+        if not self._sandboxes:
+            return
+
+        self.log(f"Cleaning up {len(self._sandboxes)} sandbox(es)...")
+        for sandbox in self._sandboxes:
+            try:
+                await sandbox.terminate.aio()
+            except Exception as e:
+                self.log(f"  Warning: Failed to terminate sandbox: {e}")
+        self._sandboxes.clear()
+        self.log("  Cleanup complete")
 
     async def run_test(self, name: str, test_fn) -> TestResult:
         """Run a single test and record result."""
@@ -97,7 +115,8 @@ class E2ETestRunner:
         """Test sandbox can be created."""
         from parhelia.modal_app import create_claude_sandbox, run_in_sandbox
 
-        sandbox = await create_claude_sandbox("e2e-test-sandbox")
+        sandbox = await create_claude_sandbox("e2e-test-sandbox", timeout_hours=self.E2E_TIMEOUT_HOURS)
+        self._sandboxes.append(sandbox)  # Track for cleanup
         assert sandbox is not None, "Sandbox creation failed"
 
         # Verify basic command execution
@@ -108,7 +127,8 @@ class E2ETestRunner:
         """Test Claude Code can process a simple prompt."""
         from parhelia.modal_app import create_claude_sandbox, run_in_sandbox
 
-        sandbox = await create_claude_sandbox("e2e-test-prompt")
+        sandbox = await create_claude_sandbox("e2e-test-prompt", timeout_hours=self.E2E_TIMEOUT_HOURS)
+        self._sandboxes.append(sandbox)  # Track for cleanup
 
         # Run Claude with a simple math prompt
         output = await run_in_sandbox(
@@ -123,7 +143,8 @@ class E2ETestRunner:
         from parhelia.modal_app import create_claude_sandbox, run_in_sandbox
 
         # Create sandbox and run entrypoint manually
-        sandbox = await create_claude_sandbox("e2e-entrypoint-test")
+        sandbox = await create_claude_sandbox("e2e-entrypoint-test", timeout_hours=self.E2E_TIMEOUT_HOURS)
+        self._sandboxes.append(sandbox)  # Track for cleanup
 
         # Run entrypoint
         await run_in_sandbox(
@@ -191,34 +212,38 @@ class E2ETestRunner:
         self.log(f"Starting E2E tests (level: {self.level})")
         self.log("=" * 50)
 
-        # Smoke tests (always run)
-        self.results.append(await self.run_test("Health Check", self.test_health_check))
-        self.results.append(
-            await self.run_test("Volume Structure", self.test_volume_structure)
-        )
+        try:
+            # Smoke tests (always run)
+            self.results.append(await self.run_test("Health Check", self.test_health_check))
+            self.results.append(
+                await self.run_test("Volume Structure", self.test_volume_structure)
+            )
 
-        if self.level in ("core", "full"):
-            # Core tests
-            self.results.append(
-                await self.run_test("Sandbox Creation", self.test_sandbox_creation)
-            )
-            self.results.append(
-                await self.run_test("Simple Prompt", self.test_simple_prompt)
-            )
-            self.results.append(
-                await self.run_test(
-                    "Entrypoint Initialization", self.test_entrypoint_initialization
+            if self.level in ("core", "full"):
+                # Core tests
+                self.results.append(
+                    await self.run_test("Sandbox Creation", self.test_sandbox_creation)
                 )
-            )
+                self.results.append(
+                    await self.run_test("Simple Prompt", self.test_simple_prompt)
+                )
+                self.results.append(
+                    await self.run_test(
+                        "Entrypoint Initialization", self.test_entrypoint_initialization
+                    )
+                )
 
-        if self.level == "full":
-            # Full tests
-            self.results.append(
-                await self.run_test("CLI Submit Sync", self.test_cli_submit_sync)
-            )
-            self.results.append(
-                await self.run_test("Task Persistence", self.test_task_persistence)
-            )
+            if self.level == "full":
+                # Full tests
+                self.results.append(
+                    await self.run_test("CLI Submit Sync", self.test_cli_submit_sync)
+                )
+                self.results.append(
+                    await self.run_test("Task Persistence", self.test_task_persistence)
+                )
+        finally:
+            # Always clean up sandboxes, even if tests fail
+            await self.cleanup_sandboxes()
 
         # Summary
         self.log("=" * 50)
