@@ -65,8 +65,16 @@ from parhelia.environment import (
 from parhelia.heartbeat import HeartbeatMonitor
 from parhelia.orchestrator import Task, TaskRequirements, TaskType
 from parhelia.persistence import PersistentOrchestrator
+from parhelia.reconciler import ContainerReconciler, RealModalClient, ReconcilerConfig
 from parhelia.resume import ResumeManager
 from parhelia.session import Session, SessionState
+from parhelia.state import (
+    Container,
+    ContainerState,
+    EventType,
+    HealthStatus,
+    StateStore,
+)
 
 
 # =============================================================================
@@ -77,8 +85,10 @@ from parhelia.session import Session, SessionState
 GROUP_ALIASES: dict[str, str] = {
     "t": "task",
     "s": "session",
-    "c": "checkpoint",
+    "cp": "checkpoint",  # Changed from 'c' to 'cp' to free up 'c' for container
+    "c": "container",
     "b": "budget",
+    "r": "reconciler",
 }
 
 # Maps legacy root commands to new noun-verb equivalents
@@ -281,6 +291,8 @@ class CLIContext:
         self._resume_manager: ResumeManager | None = None
         self._budget_manager: BudgetManager | None = None
         self._heartbeat_monitor: HeartbeatMonitor | None = None
+        self._state_store: StateStore | None = None
+        self._reconciler: ContainerReconciler | None = None
 
     @property
     def orchestrator(self) -> PersistentOrchestrator:
@@ -321,6 +333,24 @@ class CLIContext:
             )
         return self._budget_manager
 
+    @property
+    def state_store(self) -> StateStore:
+        """Get or create state store for container/event tracking."""
+        if self._state_store is None:
+            self._state_store = StateStore()
+        return self._state_store
+
+    @property
+    def reconciler(self) -> ContainerReconciler:
+        """Get or create container reconciler."""
+        if self._reconciler is None:
+            self._reconciler = ContainerReconciler(
+                state_store=self.state_store,
+                modal_client=RealModalClient(),
+                config=ReconcilerConfig(),
+            )
+        return self._reconciler
+
     def log(self, message: str, level: str = "info") -> None:
         """Log a message if verbose mode is enabled."""
         if self.verbose or level == "error":
@@ -336,7 +366,11 @@ pass_context = click.make_pass_decorator(CLIContext)
 # =============================================================================
 
 
-@click.group()
+@click.group(
+    cls=DeprecatedAliasGroup,
+    aliases=GROUP_ALIASES,
+    deprecated_commands=LEGACY_COMMAND_MAPPING,
+)
 @click.option(
     "-c", "--config",
     type=click.Path(exists=True),
@@ -1407,6 +1441,632 @@ def config(ctx: CLIContext, as_json: bool) -> None:
         click.echo(f"  default_ceiling_usd = {ctx.config.budget.default_ceiling_usd}")
         click.echo(f"\n[paths]")
         click.echo(f"  volume_root = {ctx.config.paths.volume_root}")
+
+
+# =============================================================================
+# Container Command Group (SPEC-21 P5)
+# =============================================================================
+
+
+@cli.group(cls=AliasGroup, aliases={"ls": "list", "rm": "terminate"})
+def container() -> None:
+    """Container introspection commands.
+
+    Implements [SPEC-21.50] Control Plane Introspection.
+
+    View and manage Modal containers tracked by the control plane.
+    """
+    pass
+
+
+@container.command("list")
+@click.option(
+    "--state",
+    type=click.Choice(["all", "running", "created", "stopped", "terminated", "orphaned"]),
+    default="all",
+    help="Filter by container state",
+)
+@click.option(
+    "--health",
+    type=click.Choice(["all", "healthy", "degraded", "unhealthy", "dead", "unknown"]),
+    default="all",
+    help="Filter by health status",
+)
+@click.option("--limit", default=20, help="Maximum containers to show")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def container_list(
+    ctx: CLIContext,
+    state: str,
+    health: str,
+    limit: int,
+    as_json: bool,
+) -> None:
+    """List all containers with state and health.
+
+    Examples:
+        parhelia container list
+        parhelia container list --state running
+        parhelia container list --health unhealthy --json
+        parhelia c ls  # Using alias
+    """
+    store = ctx.state_store
+
+    # Get containers based on filters
+    if state != "all":
+        containers = store.get_containers_by_state(ContainerState(state))
+    elif health != "all":
+        containers = store.get_containers_by_health(HealthStatus(health))
+    else:
+        containers = store.containers.list_active(limit)
+        # Also include recently terminated
+        terminated = store.get_containers_by_state(ContainerState.TERMINATED)
+        containers = containers + terminated[:max(0, limit - len(containers))]
+
+    containers = containers[:limit]
+
+    if as_json:
+        data = {
+            "containers": [
+                {
+                    "id": c.id,
+                    "modal_sandbox_id": c.modal_sandbox_id,
+                    "state": c.state.value,
+                    "health_status": c.health_status.value,
+                    "task_id": c.task_id,
+                    "created_at": c.created_at.isoformat(),
+                    "cost_accrued_usd": c.cost_accrued_usd,
+                }
+                for c in containers
+            ],
+            "count": len(containers),
+        }
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    if not containers:
+        click.echo("No containers found.")
+        return
+
+    # Table header
+    click.echo(f"{'ID':<12} {'State':<12} {'Health':<10} {'Task ID':<16} {'Cost':<8}")
+    click.echo("-" * 62)
+
+    for c in containers:
+        state_color = {
+            "running": "green",
+            "created": "cyan",
+            "stopped": "yellow",
+            "terminated": "white",
+            "orphaned": "red",
+        }.get(c.state.value, "white")
+
+        health_color = {
+            "healthy": "green",
+            "degraded": "yellow",
+            "unhealthy": "red",
+            "dead": "red",
+        }.get(c.health_status.value, "white")
+
+        click.echo(
+            f"{c.id:<12} "
+            f"{click.style(c.state.value, fg=state_color):<12} "
+            f"{click.style(c.health_status.value, fg=health_color):<10} "
+            f"{(c.task_id or '-'):<16} "
+            f"${c.cost_accrued_usd:.2f}"
+        )
+
+
+@container.command("show")
+@click.argument("container_id")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def container_show(ctx: CLIContext, container_id: str, as_json: bool) -> None:
+    """Show detailed information about a container.
+
+    Examples:
+        parhelia container show c-abc12345
+        parhelia container show c-abc12345 --json
+    """
+    store = ctx.state_store
+    container = store.get_container(container_id)
+
+    if not container:
+        # Try by Modal sandbox ID
+        container = store.get_container_by_modal_id(container_id)
+
+    if not container:
+        click.secho(f"Container not found: {container_id}", fg="red")
+        sys.exit(1)
+
+    if as_json:
+        from dataclasses import asdict
+        data = asdict(container)
+        # Convert enums and datetimes
+        data["state"] = container.state.value
+        data["health_status"] = container.health_status.value
+        data["created_at"] = container.created_at.isoformat()
+        data["started_at"] = container.started_at.isoformat() if container.started_at else None
+        data["terminated_at"] = container.terminated_at.isoformat() if container.terminated_at else None
+        data["last_heartbeat_at"] = container.last_heartbeat_at.isoformat() if container.last_heartbeat_at else None
+        data["updated_at"] = container.updated_at.isoformat()
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    click.echo(f"Container: {container.id}")
+    click.echo("=" * 50)
+
+    click.echo(f"\nIdentifiers:")
+    click.echo(f"  Container ID:     {container.id}")
+    click.echo(f"  Modal Sandbox ID: {container.modal_sandbox_id}")
+    click.echo(f"  Worker ID:        {container.worker_id or '-'}")
+    click.echo(f"  Task ID:          {container.task_id or '-'}")
+    click.echo(f"  Session ID:       {container.session_id or '-'}")
+
+    click.echo(f"\nStatus:")
+    click.echo(f"  State:            {container.state.value}")
+    click.echo(f"  Health:           {container.health_status.value}")
+    click.echo(f"  Failures:         {container.consecutive_failures}")
+
+    click.echo(f"\nLifecycle:")
+    click.echo(f"  Created:          {container.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    if container.started_at:
+        click.echo(f"  Started:          {container.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    if container.terminated_at:
+        click.echo(f"  Terminated:       {container.terminated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    if container.last_heartbeat_at:
+        click.echo(f"  Last Heartbeat:   {container.last_heartbeat_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if container.termination_reason:
+        click.echo(f"\nTermination:")
+        click.echo(f"  Reason:           {container.termination_reason}")
+        if container.exit_code is not None:
+            click.echo(f"  Exit Code:        {container.exit_code}")
+
+    click.echo(f"\nResources:")
+    click.echo(f"  CPU Cores:        {container.cpu_cores or '-'}")
+    click.echo(f"  Memory MB:        {container.memory_mb or '-'}")
+    click.echo(f"  GPU:              {container.gpu_type or '-'}")
+    click.echo(f"  Region:           {container.region or '-'}")
+
+    click.echo(f"\nCost:")
+    click.echo(f"  Accrued:          ${container.cost_accrued_usd:.4f}")
+    if container.cost_rate_per_hour:
+        click.echo(f"  Rate/hr:          ${container.cost_rate_per_hour:.4f}")
+
+
+@container.command("events")
+@click.argument("container_id")
+@click.option("--limit", default=50, help="Maximum events to show")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def container_events(ctx: CLIContext, container_id: str, limit: int, as_json: bool) -> None:
+    """Show event history for a container.
+
+    Examples:
+        parhelia container events c-abc12345
+        parhelia container events c-abc12345 --limit 100
+    """
+    store = ctx.state_store
+    events = store.get_events(container_id=container_id, limit=limit)
+
+    if as_json:
+        data = {
+            "container_id": container_id,
+            "events": [
+                {
+                    "id": e.id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "event_type": e.event_type.value,
+                    "message": e.message,
+                    "old_value": e.old_value,
+                    "new_value": e.new_value,
+                    "source": e.source,
+                }
+                for e in events
+            ],
+            "count": len(events),
+        }
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    if not events:
+        click.echo(f"No events found for container: {container_id}")
+        return
+
+    click.echo(f"Events for {container_id} ({len(events)} events)")
+    click.echo("=" * 70)
+
+    for e in events:
+        time_str = e.timestamp.strftime("%H:%M:%S")
+        type_color = {
+            "container_created": "cyan",
+            "container_started": "green",
+            "container_stopped": "yellow",
+            "container_terminated": "white",
+            "container_healthy": "green",
+            "container_unhealthy": "red",
+            "container_dead": "red",
+            "orphan_detected": "red",
+            "error": "red",
+        }.get(e.event_type.value, "white")
+
+        click.echo(
+            f"[{time_str}] "
+            f"{click.style(e.event_type.value, fg=type_color)}: "
+            f"{e.message or '-'}"
+        )
+
+
+@container.command("health")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def container_health(ctx: CLIContext, as_json: bool) -> None:
+    """Show container health summary.
+
+    Provides overview of container states and health across the control plane.
+
+    Examples:
+        parhelia container health
+        parhelia container health --json
+    """
+    store = ctx.state_store
+    stats = store.get_container_stats()
+
+    if as_json:
+        data = {
+            "total": stats.total,
+            "by_state": stats.by_state,
+            "by_health": stats.by_health,
+            "total_cost_usd": stats.total_cost_usd,
+            "oldest_running": stats.oldest_running.isoformat() if stats.oldest_running else None,
+        }
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    click.echo("Container Health Summary")
+    click.echo("=" * 40)
+
+    click.echo(f"\nTotal Containers: {stats.total}")
+    click.echo(f"Total Cost:       ${stats.total_cost_usd:.2f}")
+
+    click.echo(f"\nBy State:")
+    for state, count in sorted(stats.by_state.items()):
+        color = {
+            "running": "green",
+            "created": "cyan",
+            "stopped": "yellow",
+            "terminated": "white",
+            "orphaned": "red",
+        }.get(state, "white")
+        click.echo(f"  {click.style(state, fg=color):<14} {count}")
+
+    click.echo(f"\nBy Health:")
+    for health, count in sorted(stats.by_health.items()):
+        color = {
+            "healthy": "green",
+            "degraded": "yellow",
+            "unhealthy": "red",
+            "dead": "red",
+        }.get(health, "white")
+        click.echo(f"  {click.style(health, fg=color):<14} {count}")
+
+    if stats.oldest_running:
+        elapsed = datetime.now() - stats.oldest_running
+        hours = int(elapsed.total_seconds() // 3600)
+        click.echo(f"\nOldest Running: {hours}h (since {stats.oldest_running.strftime('%Y-%m-%d %H:%M')})")
+
+
+@container.command("watch")
+@click.option("--state", help="Filter by state")
+@click.option("--interval", default=5, help="Refresh interval in seconds")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON lines")
+@pass_context
+def container_watch(ctx: CLIContext, state: str | None, interval: int, as_json: bool) -> None:
+    """Watch container changes in real-time.
+
+    Streams container state changes as they occur.
+
+    Examples:
+        parhelia container watch
+        parhelia container watch --state running
+        parhelia container watch --interval 10 --json
+    """
+    import time
+
+    if not as_json:
+        click.echo("Watching containers for changes (Ctrl+C to stop)...")
+        click.echo("")
+
+    last_seen: dict[str, tuple[str, str]] = {}  # id -> (state, health)
+
+    try:
+        while True:
+            store = ctx.state_store
+
+            if state:
+                containers = store.get_containers_by_state(ContainerState(state))
+            else:
+                containers = store.containers.list_active(100)
+
+            current: dict[str, tuple[str, str]] = {}
+            changes = []
+
+            for c in containers:
+                current[c.id] = (c.state.value, c.health_status.value)
+
+                if c.id not in last_seen:
+                    changes.append({
+                        "type": "new",
+                        "container_id": c.id,
+                        "state": c.state.value,
+                        "health": c.health_status.value,
+                    })
+                elif last_seen[c.id] != current[c.id]:
+                    old_state, old_health = last_seen[c.id]
+                    changes.append({
+                        "type": "changed",
+                        "container_id": c.id,
+                        "old_state": old_state,
+                        "new_state": c.state.value,
+                        "old_health": old_health,
+                        "new_health": c.health_status.value,
+                    })
+
+            # Check for removed containers
+            for cid in last_seen:
+                if cid not in current:
+                    changes.append({
+                        "type": "removed",
+                        "container_id": cid,
+                    })
+
+            # Output changes
+            for change in changes:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                if as_json:
+                    change["timestamp"] = datetime.now().isoformat()
+                    click.echo(json.dumps(change))
+                else:
+                    if change["type"] == "new":
+                        click.echo(
+                            f"[{timestamp}] "
+                            f"{click.style('NEW', fg='cyan')}: {change['container_id']} "
+                            f"({change['state']}, {change['health']})"
+                        )
+                    elif change["type"] == "changed":
+                        click.echo(
+                            f"[{timestamp}] "
+                            f"{click.style('CHANGED', fg='yellow')}: {change['container_id']} "
+                            f"state: {change['old_state']} -> {change['new_state']}, "
+                            f"health: {change['old_health']} -> {change['new_health']}"
+                        )
+                    elif change["type"] == "removed":
+                        click.echo(
+                            f"[{timestamp}] "
+                            f"{click.style('REMOVED', fg='red')}: {change['container_id']}"
+                        )
+
+            last_seen = current
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        if not as_json:
+            click.echo("\nStopped watching.")
+
+
+@container.command("terminate")
+@click.argument("container_id")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
+@click.option("--force", is_flag=True, help="Force termination even if busy")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def container_terminate(
+    ctx: CLIContext,
+    container_id: str,
+    yes: bool,
+    force: bool,
+    as_json: bool,
+) -> None:
+    """Terminate a container.
+
+    Gracefully terminates a container and updates the control plane state.
+
+    Examples:
+        parhelia container terminate c-abc12345
+        parhelia container terminate c-abc12345 -y --force
+        parhelia c rm c-abc12345  # Using alias
+    """
+    store = ctx.state_store
+    container = store.get_container(container_id)
+
+    if not container:
+        container = store.get_container_by_modal_id(container_id)
+
+    if not container:
+        if as_json:
+            click.echo(json.dumps({"success": False, "error": f"Container not found: {container_id}"}))
+        else:
+            click.secho(f"Container not found: {container_id}", fg="red")
+        sys.exit(1)
+
+    if container.state == ContainerState.TERMINATED:
+        if as_json:
+            click.echo(json.dumps({"success": False, "error": "Container already terminated"}))
+        else:
+            click.echo("Container already terminated.")
+        return
+
+    # Confirm unless -y
+    if not yes and not as_json:
+        click.echo(f"Container: {container.id}")
+        click.echo(f"  Modal ID: {container.modal_sandbox_id}")
+        click.echo(f"  State:    {container.state.value}")
+        click.echo(f"  Task:     {container.task_id or '-'}")
+        click.echo("")
+        if not click.confirm("Terminate this container?"):
+            click.echo("Cancelled.")
+            return
+
+    async def _terminate():
+        reconciler = ctx.reconciler
+        success = await reconciler.modal_client.terminate_sandbox(container.modal_sandbox_id)
+
+        if success:
+            store.update_container_state(
+                container.id,
+                ContainerState.TERMINATED,
+                reason="Manual termination via CLI",
+            )
+        return success
+
+    success = asyncio.run(_terminate())
+
+    if as_json:
+        click.echo(json.dumps({
+            "success": success,
+            "container_id": container.id,
+            "modal_sandbox_id": container.modal_sandbox_id,
+        }))
+    else:
+        if success:
+            click.secho(f"Container {container.id} terminated successfully", fg="green")
+        else:
+            click.secho(f"Failed to terminate container {container.id}", fg="red")
+            sys.exit(1)
+
+
+# =============================================================================
+# Reconciler Command Group (SPEC-21 P5)
+# =============================================================================
+
+
+@cli.group()
+def reconciler() -> None:
+    """Reconciler status and control commands.
+
+    Implements [SPEC-21.50] Control Plane Introspection.
+    """
+    pass
+
+
+@reconciler.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def reconciler_status(ctx: CLIContext, as_json: bool) -> None:
+    """Show reconciler status and last run info.
+
+    Examples:
+        parhelia reconciler status
+        parhelia r status  # Using alias
+    """
+    reconciler = ctx.reconciler
+    store = ctx.state_store
+
+    # Get recent reconciliation events
+    recent_events = store.get_events(
+        event_type=EventType.STATE_DRIFT_CORRECTED,
+        limit=5,
+    )
+    orphan_events = store.get_events(
+        event_type=EventType.ORPHAN_DETECTED,
+        limit=5,
+    )
+    error_events = store.get_events(
+        event_type=EventType.RECONCILE_FAILED,
+        limit=3,
+    )
+
+    # Get container stats
+    stats = store.get_container_stats()
+    orphaned_count = stats.by_state.get("orphaned", 0)
+
+    if as_json:
+        data = {
+            "is_running": reconciler.is_running,
+            "config": {
+                "poll_interval_seconds": reconciler.config.poll_interval_seconds,
+                "stale_threshold_seconds": reconciler.config.stale_threshold_seconds,
+                "orphan_grace_period_seconds": reconciler.config.orphan_grace_period_seconds,
+                "auto_terminate_orphans": reconciler.config.auto_terminate_orphans,
+            },
+            "stats": {
+                "total_containers": stats.total,
+                "orphaned_containers": orphaned_count,
+            },
+            "recent_drift_corrections": len(recent_events),
+            "recent_orphans_detected": len(orphan_events),
+            "recent_errors": len(error_events),
+        }
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    click.echo("Reconciler Status")
+    click.echo("=" * 40)
+
+    status_str = click.style("Running", fg="green") if reconciler.is_running else click.style("Stopped", fg="yellow")
+    click.echo(f"\nStatus: {status_str}")
+
+    click.echo(f"\nConfiguration:")
+    click.echo(f"  Poll Interval:      {reconciler.config.poll_interval_seconds}s")
+    click.echo(f"  Stale Threshold:    {reconciler.config.stale_threshold_seconds}s")
+    click.echo(f"  Orphan Grace:       {reconciler.config.orphan_grace_period_seconds}s")
+    click.echo(f"  Auto-Terminate:     {reconciler.config.auto_terminate_orphans}")
+
+    click.echo(f"\nContainer Stats:")
+    click.echo(f"  Total:              {stats.total}")
+    click.echo(f"  Orphaned:           {orphaned_count}")
+
+    if recent_events:
+        click.echo(f"\nRecent Drift Corrections ({len(recent_events)}):")
+        for e in recent_events[:3]:
+            click.echo(f"  [{e.timestamp.strftime('%H:%M:%S')}] {e.container_id}: {e.message}")
+
+    if orphan_events:
+        click.echo(f"\nRecent Orphans Detected ({len(orphan_events)}):")
+        for e in orphan_events[:3]:
+            click.echo(f"  [{e.timestamp.strftime('%H:%M:%S')}] {e.container_id}")
+
+    if error_events:
+        click.echo(f"\nRecent Errors ({len(error_events)}):")
+        for e in error_events:
+            click.echo(f"  [{e.timestamp.strftime('%H:%M:%S')}] {e.message}")
+
+
+@reconciler.command("run")
+@click.option("--once", is_flag=True, help="Run single reconciliation cycle")
+@pass_context
+def reconciler_run(ctx: CLIContext, once: bool) -> None:
+    """Manually trigger reconciliation.
+
+    Examples:
+        parhelia reconciler run --once
+    """
+    async def _run():
+        reconciler = ctx.reconciler
+
+        if once:
+            spinner = create_spinner("Running reconciliation...")
+            spinner.start()
+            try:
+                result = await reconciler.reconcile()
+                spinner.stop(success=True)
+                click.echo(f"\n{result}")
+                if result.errors:
+                    for err in result.errors:
+                        click.secho(f"  Error: {err}", fg="red")
+            except Exception as e:
+                spinner.stop(success=False, final_message=str(e))
+                sys.exit(1)
+        else:
+            click.echo("Starting reconciliation loop (Ctrl+C to stop)...")
+            try:
+                await reconciler.run_background()
+            except KeyboardInterrupt:
+                reconciler.stop()
+                click.echo("\nReconciliation stopped.")
+
+    asyncio.run(_run())
 
 
 # =============================================================================

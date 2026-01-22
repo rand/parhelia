@@ -1,13 +1,40 @@
 """Parhelia MCP server for programmatic access.
 
-Implements [SPEC-11.40] MCP Server and [SPEC-11.41] MCP Tools.
+Implements [SPEC-11.40] MCP Server, [SPEC-21.60] MCP Integration,
+and [SPEC-20.30] Agent Excellence.
 
-Exposes Parhelia functionality as MCP tools for Claude Code and other agents:
-- parhelia_submit: Submit tasks for execution
-- parhelia_status: Get task/session status
-- parhelia_attach_info: Get SSH connection info for attach
-- parhelia_checkpoint: Create or list checkpoints
-- parhelia_budget: Check budget status
+Exposes 15+ MCP tools for Claude Code and other agents:
+
+Container tools:
+- parhelia_containers: List containers with optional filters
+- parhelia_container_show: Get container details
+- parhelia_container_terminate: Terminate a container
+- parhelia_container_events: Get container event history
+
+Health tools:
+- parhelia_health: Control plane health status
+- parhelia_reconciler_status: Reconciler status and last run
+
+Task tools:
+- parhelia_task_create: Create task with cost estimate
+- parhelia_task_list: List tasks
+- parhelia_task_show: Show task details
+- parhelia_task_cancel: Cancel running task
+- parhelia_task_retry: Retry failed task
+
+Session tools:
+- parhelia_session_list: List sessions
+- parhelia_session_attach_info: Get attach info
+- parhelia_session_kill: Kill a session
+
+Checkpoint tools:
+- parhelia_checkpoint_create: Create checkpoint
+- parhelia_checkpoint_list: List checkpoints
+- parhelia_checkpoint_restore: Restore checkpoint
+
+Budget tools:
+- parhelia_budget_status: Budget status
+- parhelia_budget_estimate: Estimate cost for task
 
 Usage:
     parhelia mcp-server  # Start MCP server on stdio
@@ -25,6 +52,7 @@ from typing import Any, Callable, Coroutine
 from parhelia.budget import BudgetManager
 from parhelia.checkpoint import CheckpointManager
 from parhelia.config import load_config
+from parhelia.mcp import ParheliaMCPTools
 from parhelia.orchestrator import Task, TaskRequirements, TaskType
 from parhelia.persistence import PersistentOrchestrator
 
@@ -73,12 +101,8 @@ class ParheliaMCPServer:
 
     Implements JSON-RPC 2.0 over stdio for MCP protocol.
 
-    Tools provided:
-    - parhelia_submit: Submit a task for remote execution
-    - parhelia_status: Get status of a task or list tasks
-    - parhelia_attach_info: Get SSH connection info for a session
-    - parhelia_checkpoint: Manage checkpoints
-    - parhelia_budget: Check budget status
+    Provides 15+ tools for control plane introspection and task management.
+    See module docstring for full tool list.
     """
 
     def __init__(self):
@@ -89,6 +113,15 @@ class ParheliaMCPServer:
         self.checkpoint_manager = CheckpointManager(
             storage_root=self.config.paths.volume_root + "/checkpoints"
         )
+
+        # Initialize comprehensive MCP tools
+        self.mcp_tools = ParheliaMCPTools(
+            orchestrator=self.orchestrator,
+            budget_manager=self.budget_manager,
+            checkpoint_manager=self.checkpoint_manager,
+        )
+
+        # Legacy tools dict for backward compatibility
         self.tools: dict[str, MCPTool] = {}
         self._register_tools()
 
@@ -411,41 +444,37 @@ class ParheliaMCPServer:
                     },
                     "serverInfo": {
                         "name": "parhelia",
-                        "version": "0.1.0",
+                        "version": "0.2.0",
                     },
                 },
             )
 
         if request.method == "tools/list":
+            # Combine legacy tools with new comprehensive tools
+            all_tools = self.mcp_tools.get_tools()
+
+            # Add legacy tools that aren't duplicated
+            legacy_names = {t["name"] for t in all_tools}
+            for tool in self.tools.values():
+                if tool.name not in legacy_names:
+                    all_tools.append({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    })
+
             return MCPResponse(
                 id=request.id,
-                result={
-                    "tools": [
-                        {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "inputSchema": tool.input_schema,
-                        }
-                        for tool in self.tools.values()
-                    ],
-                },
+                result={"tools": all_tools},
             )
 
         if request.method == "tools/call":
             tool_name = request.params.get("name")
             tool_args = request.params.get("arguments", {})
 
-            if tool_name not in self.tools:
-                return MCPResponse(
-                    id=request.id,
-                    error={
-                        "code": -32601,
-                        "message": f"Unknown tool: {tool_name}",
-                    },
-                )
-
+            # Try new tools first
             try:
-                result = await self.tools[tool_name].handler(**tool_args)
+                result = await self.mcp_tools.call_tool(tool_name, tool_args)
                 return MCPResponse(
                     id=request.id,
                     result={
@@ -457,6 +486,9 @@ class ParheliaMCPServer:
                         ],
                     },
                 )
+            except KeyError:
+                # Tool not found in new tools, try legacy
+                pass
             except Exception as e:
                 return MCPResponse(
                     id=request.id,
@@ -465,6 +497,38 @@ class ParheliaMCPServer:
                         "message": f"Tool execution failed: {e}",
                     },
                 )
+
+            # Try legacy tools
+            if tool_name in self.tools:
+                try:
+                    result = await self.tools[tool_name].handler(**tool_args)
+                    return MCPResponse(
+                        id=request.id,
+                        result={
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(result, indent=2),
+                                }
+                            ],
+                        },
+                    )
+                except Exception as e:
+                    return MCPResponse(
+                        id=request.id,
+                        error={
+                            "code": -32603,
+                            "message": f"Tool execution failed: {e}",
+                        },
+                    )
+
+            return MCPResponse(
+                id=request.id,
+                error={
+                    "code": -32601,
+                    "message": f"Unknown tool: {tool_name}",
+                },
+            )
 
         return MCPResponse(
             id=request.id,
