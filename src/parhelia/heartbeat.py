@@ -2,6 +2,7 @@
 
 Implements:
 - [SPEC-03.12] Heartbeat Monitoring
+- [SPEC-21.12] Heartbeat History Schema
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Callable, Awaitable, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from parhelia.state import StateStore
 
 
 class HeartbeatState(Enum):
@@ -88,6 +92,7 @@ class HeartbeatMonitor:
         on_critical: HeartbeatCallback | None = None,
         on_dead: HeartbeatCallback | None = None,
         on_recovery: HeartbeatCallback | None = None,
+        state_store: "StateStore | None" = None,
     ):
         """Initialize the heartbeat monitor.
 
@@ -98,6 +103,7 @@ class HeartbeatMonitor:
             on_critical: Callback when session enters CRITICAL state.
             on_dead: Callback when session enters DEAD state.
             on_recovery: Callback when session recovers to HEALTHY.
+            state_store: Optional state store for persisting heartbeats.
         """
         self.interval = interval
         self.missed_threshold = missed_threshold
@@ -108,8 +114,13 @@ class HeartbeatMonitor:
         self._on_dead = on_dead
         self._on_recovery = on_recovery
 
+        # State store for persistence
+        self._state_store = state_store
+
         # Session tracking
         self._sessions: dict[str, HeartbeatInfo] = {}
+        # Map session_id to container_id for StateStore lookups
+        self._session_to_container: dict[str, str] = {}
         self._monitor_task: asyncio.Task | None = None
         self._running = False
 
@@ -117,12 +128,14 @@ class HeartbeatMonitor:
         self,
         session_id: str,
         metadata: dict[str, Any] | None = None,
+        container_id: str | None = None,
     ) -> HeartbeatInfo:
         """Register a session for heartbeat monitoring.
 
         Args:
             session_id: The session ID to monitor.
             metadata: Optional metadata to attach.
+            container_id: Optional container ID for StateStore persistence.
 
         Returns:
             HeartbeatInfo for the session.
@@ -133,6 +146,11 @@ class HeartbeatMonitor:
             metadata=metadata or {},
         )
         self._sessions[session_id] = info
+
+        # Track container mapping for StateStore persistence
+        if container_id:
+            self._session_to_container[session_id] = container_id
+
         return info
 
     def unregister_session(self, session_id: str) -> HeartbeatInfo | None:
@@ -144,6 +162,8 @@ class HeartbeatMonitor:
         Returns:
             The removed HeartbeatInfo, or None if not found.
         """
+        # Clean up container mapping
+        self._session_to_container.pop(session_id, None)
         return self._sessions.pop(session_id, None)
 
     def record_heartbeat(
@@ -153,7 +173,7 @@ class HeartbeatMonitor:
     ) -> HeartbeatInfo | None:
         """Record a heartbeat from a session.
 
-        Implements [SPEC-03.12].
+        Implements [SPEC-03.12] and [SPEC-21.12].
 
         Args:
             session_id: The session sending the heartbeat.
@@ -174,6 +194,9 @@ class HeartbeatMonitor:
         if metadata:
             info.metadata.update(metadata)
 
+        # Persist heartbeat to StateStore if configured
+        self._persist_heartbeat(session_id, metadata or {})
+
         # Handle recovery from non-healthy states
         if info.state != HeartbeatState.HEALTHY:
             previous = info.state
@@ -190,6 +213,41 @@ class HeartbeatMonitor:
                 )
 
         return info
+
+    def _persist_heartbeat(
+        self,
+        session_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Persist heartbeat to StateStore.
+
+        Implements [SPEC-21.12].
+
+        Args:
+            session_id: The session ID.
+            metadata: Heartbeat metadata with optional metrics.
+        """
+        if not self._state_store:
+            return
+
+        container_id = self._session_to_container.get(session_id)
+        if not container_id:
+            return
+
+        from parhelia.state import Heartbeat as StateHeartbeat
+
+        heartbeat = StateHeartbeat.create(
+            container_id=container_id,
+            cpu_percent=metadata.get("cpu_percent"),
+            memory_percent=metadata.get("memory_percent"),
+            memory_mb=metadata.get("memory_mb"),
+            disk_percent=metadata.get("disk_percent"),
+            uptime_seconds=metadata.get("uptime_seconds"),
+            tmux_active=metadata.get("tmux_active", False),
+            claude_responsive=metadata.get("claude_responsive", False),
+            metadata=metadata,
+        )
+        self._state_store.record_heartbeat(heartbeat)
 
     def get_session_info(self, session_id: str) -> HeartbeatInfo | None:
         """Get heartbeat info for a session.

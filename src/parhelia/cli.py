@@ -2,20 +2,44 @@
 
 Implements CLI commands for managing Claude Code sessions in Modal containers.
 
-Usage:
-    parhelia status              # Show system status
-    parhelia list                # List active sessions
-    parhelia submit <prompt>     # Submit a new task
-    parhelia attach <session>    # Attach to a session
-    parhelia detach <session>    # Detach from a session
-    parhelia checkpoint <session> # Create checkpoint
-    parhelia resume <session>    # Resume from checkpoint
-    parhelia logs <session>      # View session logs
+Usage (noun-verb pattern per SPEC-20.11):
+    parhelia task create <prompt>    # Submit a new task
+    parhelia task list               # List tasks
+    parhelia task show <id>          # Show task details
+    parhelia task cancel <id>        # Cancel a running task
+    parhelia task retry <id>         # Retry a failed task
+    parhelia task watch <id>         # Watch task status
+
+    parhelia session list            # List sessions
+    parhelia session attach <id>     # Attach to session
+    parhelia session kill <id>       # Kill a session
+
+    parhelia checkpoint create <id>  # Create checkpoint
+    parhelia checkpoint list         # List checkpoints
+    parhelia checkpoint restore <id> # Restore from checkpoint
+    parhelia checkpoint diff <a> <b> # Compare checkpoints
+
+    parhelia budget status           # Show budget status
+    parhelia budget set <amount>     # Set budget ceiling
+    parhelia budget history          # Show budget history
+
+    parhelia completion <shell>      # Output shell completion script
+
+Aliases (SPEC-20.12):
+    t  -> task       s  -> session
+    c  -> checkpoint b  -> budget
+
+Legacy commands (deprecated but functional):
+    parhelia submit <prompt>     # -> task create
+    parhelia list                # -> task list
+    parhelia attach <session>    # -> session attach
+    parhelia detach <session>    # -> session detach
 """
 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import sys
 from datetime import datetime
@@ -37,6 +61,194 @@ from parhelia.orchestrator import Task, TaskRequirements, TaskType
 from parhelia.persistence import PersistentOrchestrator
 from parhelia.resume import ResumeManager
 from parhelia.session import Session, SessionState
+
+
+# =============================================================================
+# Command Aliases (SPEC-20.12)
+# =============================================================================
+
+# Maps short aliases to full command names
+GROUP_ALIASES: dict[str, str] = {
+    "t": "task",
+    "s": "session",
+    "c": "checkpoint",
+    "b": "budget",
+}
+
+# Maps legacy root commands to new noun-verb equivalents
+LEGACY_COMMAND_MAPPING: dict[str, tuple[str, str]] = {
+    "submit": ("task", "create"),
+    "list": ("task", "list"),
+    "attach": ("session", "attach"),
+    "detach": ("session", "detach"),
+}
+
+
+# =============================================================================
+# Fuzzy Matching (SPEC-20.14)
+# =============================================================================
+
+
+def get_close_matches_for_command(
+    word: str,
+    possibilities: list[str],
+    n: int = 3,
+    cutoff: float = 0.6,
+) -> list[str]:
+    """Find close matches for a command using Levenshtein distance.
+
+    Args:
+        word: The misspelled command.
+        possibilities: List of valid command names.
+        n: Maximum number of suggestions.
+        cutoff: Minimum similarity ratio (0-1).
+
+    Returns:
+        List of similar command names, sorted by similarity.
+    """
+    return difflib.get_close_matches(word, possibilities, n=n, cutoff=cutoff)
+
+
+def suggest_command(invalid_cmd: str, valid_commands: list[str]) -> str | None:
+    """Generate a suggestion message for an invalid command.
+
+    Args:
+        invalid_cmd: The command that was not found.
+        valid_commands: List of valid command names.
+
+    Returns:
+        Suggestion message or None if no close matches.
+    """
+    matches = get_close_matches_for_command(invalid_cmd, valid_commands)
+    if not matches:
+        return None
+
+    if len(matches) == 1:
+        return f"Did you mean '{matches[0]}'?"
+    else:
+        suggestions = "\n".join(f"  - {m}" for m in matches)
+        return f"Did you mean one of these?\n{suggestions}"
+
+
+# =============================================================================
+# Deprecation Warnings
+# =============================================================================
+
+
+def emit_deprecation_warning(old_cmd: str, new_cmd: str) -> None:
+    """Emit a deprecation warning for legacy commands.
+
+    Args:
+        old_cmd: The deprecated command name.
+        new_cmd: The new command to use instead.
+    """
+    click.secho(
+        f"Warning: '{old_cmd}' is deprecated. Use '{new_cmd}' instead.",
+        fg="yellow",
+        err=True,
+    )
+
+
+# =============================================================================
+# Custom Click Classes for Alias and Fuzzy Matching Support
+# =============================================================================
+
+
+class AliasGroup(click.Group):
+    """Click Group that supports command aliases and fuzzy matching.
+
+    Implements SPEC-20.12 (aliases) and SPEC-20.14 (fuzzy matching).
+    """
+
+    def __init__(self, *args, aliases: dict[str, str] | None = None, **kwargs):
+        """Initialize the alias group.
+
+        Args:
+            aliases: Mapping of alias -> real command name.
+        """
+        super().__init__(*args, **kwargs)
+        self.aliases = aliases or {}
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        """Get a command, resolving aliases first.
+
+        Args:
+            ctx: Click context.
+            cmd_name: Command name (may be an alias).
+
+        Returns:
+            The resolved command or None.
+        """
+        # First, try to resolve as an alias
+        resolved_name = self.aliases.get(cmd_name, cmd_name)
+
+        # Get the command
+        cmd = super().get_command(ctx, resolved_name)
+
+        if cmd is not None:
+            return cmd
+
+        # Command not found - try fuzzy matching
+        valid_commands = list(self.list_commands(ctx))
+        suggestion = suggest_command(cmd_name, valid_commands)
+
+        if suggestion:
+            click.secho(f"\nUnknown command: {cmd_name}", fg="red", err=True)
+            click.secho(suggestion, fg="yellow", err=True)
+            click.echo("\nRun 'parhelia --help' for all commands.", err=True)
+
+        return None
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        """Resolve command name and handle aliases.
+
+        Args:
+            ctx: Click context.
+            args: Command arguments.
+
+        Returns:
+            Tuple of (command name, command, remaining args).
+        """
+        cmd_name, cmd, args = super().resolve_command(ctx, args)
+
+        # If we resolved an alias, use the original name for display
+        if cmd_name in self.aliases:
+            cmd_name = self.aliases[cmd_name]
+
+        return cmd_name, cmd, args
+
+
+class DeprecatedAliasGroup(AliasGroup):
+    """Click Group that handles deprecated legacy commands.
+
+    Shows deprecation warnings when legacy commands are used.
+    """
+
+    def __init__(
+        self,
+        *args,
+        deprecated_commands: dict[str, tuple[str, str]] | None = None,
+        **kwargs,
+    ):
+        """Initialize with deprecated command mappings.
+
+        Args:
+            deprecated_commands: Mapping of old_cmd -> (group, verb).
+        """
+        super().__init__(*args, **kwargs)
+        self.deprecated_commands = deprecated_commands or {}
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        """Get command, emitting deprecation warning for legacy commands."""
+        # Check if this is a deprecated command
+        if cmd_name in self.deprecated_commands:
+            group_name, verb = self.deprecated_commands[cmd_name]
+            new_cmd = f"parhelia {group_name} {verb}"
+            emit_deprecation_warning(f"parhelia {cmd_name}", new_cmd)
+
+        return super().get_command(ctx, cmd_name)
 
 
 # =============================================================================

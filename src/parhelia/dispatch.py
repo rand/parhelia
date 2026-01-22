@@ -24,6 +24,7 @@ from parhelia.orchestrator import (
     WorkerState,
 )
 from parhelia.persistence import PersistentOrchestrator
+from parhelia.state import Container, ContainerState, StateStore
 
 if TYPE_CHECKING:
     import modal
@@ -75,6 +76,7 @@ class TaskDispatcher:
         skip_modal: bool = False,
         hook_executor: "HookExecutor | None" = None,
         budget_manager: "BudgetManager | None" = None,
+        state_store: StateStore | None = None,
     ):
         """Initialize the dispatcher.
 
@@ -83,11 +85,13 @@ class TaskDispatcher:
             skip_modal: If True, skip actual Modal calls (for testing/dry-run).
             hook_executor: Optional hook executor for pre/post dispatch hooks.
             budget_manager: Optional budget manager for hook context.
+            state_store: Optional state store for container lifecycle tracking.
         """
         self.orchestrator = orchestrator
         self.skip_modal = skip_modal
         self.hook_executor = hook_executor
         self.budget_manager = budget_manager
+        self.state_store = state_store
         self._progress_callback: Callable[[str], None] | None = None
 
     def set_progress_callback(self, callback: Callable[[str], None]) -> None:
@@ -100,6 +104,74 @@ class TaskDispatcher:
         """Log progress message."""
         if self._progress_callback:
             self._progress_callback(message)
+
+    def _create_container_record(
+        self,
+        task: Task,
+        worker_id: str,
+        sandbox_id: str,
+        session_id: str | None = None,
+    ) -> Container | None:
+        """Create a container record in the state store.
+
+        Args:
+            task: The task being dispatched.
+            worker_id: The worker ID.
+            sandbox_id: The Modal sandbox ID.
+            session_id: Optional session ID.
+
+        Returns:
+            The created Container, or None if state_store not configured.
+        """
+        if not self.state_store:
+            return None
+
+        container = Container.create(
+            modal_sandbox_id=sandbox_id,
+            task_id=task.id,
+            worker_id=worker_id,
+            session_id=session_id,
+        )
+        self.state_store.create_container(container)
+        self._log(f"Container record created: {container.id}")
+        return container
+
+    def _update_container_state(
+        self,
+        worker_id: str,
+        new_state: ContainerState,
+        exit_code: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Update container state based on worker state change.
+
+        Args:
+            worker_id: The worker ID whose container to update.
+            new_state: The new container state.
+            exit_code: Optional exit code for termination.
+            reason: Optional reason for state change.
+        """
+        if not self.state_store:
+            return
+
+        # Get worker to find container_id
+        worker = self.orchestrator.get_worker(worker_id)
+        if not worker or not worker.container_id:
+            return
+
+        container = self.state_store.get_container(worker.container_id)
+        if not container:
+            return
+
+        # Update container state
+        if exit_code is not None:
+            container.exit_code = exit_code
+        self.state_store.update_container_state(
+            container.id,
+            new_state,
+            reason=reason,
+        )
+        self._log(f"Container {container.id} state updated to {new_state.value}")
 
     async def dispatch(
         self,
@@ -218,20 +290,31 @@ class TaskDispatcher:
         self._log(f"[dry-run] Would dispatch task {task.id}")
         self._log(f"[dry-run] Prompt: {task.prompt[:100]}...")
 
-        # Register a mock worker
+        # Use unique sandbox_id based on worker_id
+        sandbox_id = f"dry-run-{worker_id}"
+
+        # Create container record
+        container = self._create_container_record(
+            task=task,
+            worker_id=worker_id,
+            sandbox_id=sandbox_id,
+        )
+
+        # Register a mock worker with container_id link
         worker = WorkerInfo(
             id=worker_id,
             task_id=task.id,
             state=WorkerState.RUNNING,
             target_type="parhelia-cpu",
             gpu_type=task.requirements.gpu_type,
+            container_id=container.id if container else None,
         )
         self.orchestrator.register_worker(worker)
 
         return DispatchResult(
             task_id=task.id,
             worker_id=worker_id,
-            sandbox_id="dry-run-sandbox",
+            sandbox_id=sandbox_id,
             success=True,
         )
 
@@ -261,7 +344,14 @@ class TaskDispatcher:
 
         self._log(f"Sandbox created: {sandbox_id}")
 
-        # Register worker
+        # Create container record
+        container = self._create_container_record(
+            task=task,
+            worker_id=worker_id,
+            sandbox_id=sandbox_id,
+        )
+
+        # Register worker with container_id link
         target_type = "parhelia-gpu" if gpu else "parhelia-cpu"
         worker = WorkerInfo(
             id=worker_id,
@@ -270,12 +360,20 @@ class TaskDispatcher:
             target_type=target_type,
             gpu_type=gpu,
             metrics={"sandbox_id": sandbox_id},
+            container_id=container.id if container else None,
         )
         self.orchestrator.register_worker(worker)
 
         # Wait for container to be ready
         self._log("Waiting for container ready...")
         await self._wait_for_ready(sandbox)
+
+        # Update container state to RUNNING after it's ready
+        if container and self.state_store:
+            self.state_store.update_container_state(
+                container.id,
+                ContainerState.RUNNING,
+            )
 
         # Run Claude Code with the task prompt
         self._log("Starting Claude Code...")
@@ -404,10 +502,24 @@ class TaskDispatcher:
         try:
             output = await self._run_claude_and_wait(sandbox, task)
             self._log(f"Task {task.id} completed")
+            # Update container state to terminated (successful completion)
+            self._update_container_state(
+                worker_id,
+                ContainerState.TERMINATED,
+                exit_code=0,
+                reason="Task completed successfully",
+            )
         except Exception as e:
             self._log(f"Task {task.id} failed: {e}")
             self.orchestrator.mark_task_failed(task.id, str(e))
             self.orchestrator.worker_store.update_state(worker_id, WorkerState.FAILED)
+            # Update container state to terminated (failure)
+            self._update_container_state(
+                worker_id,
+                ContainerState.TERMINATED,
+                exit_code=1,
+                reason=str(e),
+            )
 
     async def dispatch_pending(
         self,

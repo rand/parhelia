@@ -64,7 +64,7 @@ class TestTaskDispatcher:
         assert result.success is True
         assert result.task_id == sample_task.id
         assert result.worker_id.startswith("worker-")
-        assert result.sandbox_id == "dry-run-sandbox"
+        assert result.sandbox_id.startswith("dry-run-")
 
     @pytest.mark.asyncio
     async def test_dispatch_registers_worker(self, dispatcher, orchestrator, sample_task):
