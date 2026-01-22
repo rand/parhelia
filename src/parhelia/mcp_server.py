@@ -740,9 +740,18 @@ def run_mcp_server(
         port: Port for HTTP transport
         require_auth: Require authentication (default: True for HTTP, False for stdio)
     """
-    # Default to requiring auth for HTTP
+    import os
+
+    # Priority: CLI flag > env var > transport default
     if require_auth is None:
-        require_auth = transport == "http"
+        env_auth = os.environ.get("PARHELIA_AUTH_REQUIRED", "").lower()
+        if env_auth in ("true", "1", "yes"):
+            require_auth = True
+        elif env_auth in ("false", "0", "no"):
+            require_auth = False
+        else:
+            # Default: require auth for HTTP, not for stdio
+            require_auth = transport == "http"
 
     server = ParheliaMCPServer(require_auth=require_auth)
 
