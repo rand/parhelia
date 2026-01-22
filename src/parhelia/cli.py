@@ -55,6 +55,14 @@ from parhelia.feedback import (
     StatusFormatter,
     create_spinner,
 )
+from parhelia.interactive import (
+    ExampleSystem,
+    HelpSystem,
+    SmartPrompt,
+    get_example_system,
+    get_help_system,
+    get_smart_prompt,
+)
 from parhelia.checkpoint import CheckpointManager
 from parhelia.config import load_config
 from parhelia.environment import (
@@ -555,10 +563,45 @@ def submit(
     Use --no-dispatch to only persist the task without execution.
     Use --sync to wait for completion.
     Use --dry-run to test without Modal.
+
+    Smart defaults: GPU type, memory, and workspace are remembered from
+    previous invocations and used as defaults for future tasks.
     """
     import uuid
 
     from parhelia.dispatch import DispatchMode, TaskDispatcher
+
+    # Smart defaults (SPEC-20.50): Remember user preferences
+    smart_prompt = get_smart_prompt()
+
+    # Use cached values if user didn't explicitly provide them
+    # GPU: use cached if user didn't change from default
+    if gpu == "none":
+        cached_gpu = smart_prompt.get_default("gpu_type")
+        if cached_gpu and cached_gpu != "none":
+            # Show that we're using a cached value
+            click.echo(StatusFormatter.info(f"Using cached GPU: {cached_gpu} (override with --gpu)"))
+            gpu = cached_gpu
+
+    # Memory: use cached if user used default (4)
+    if memory == 4:
+        cached_memory = smart_prompt.get_default("memory_gb")
+        if cached_memory:
+            try:
+                cached_memory_int = int(cached_memory)
+                if cached_memory_int != 4:
+                    click.echo(StatusFormatter.info(f"Using cached memory: {cached_memory_int}GB (override with --memory)"))
+                    memory = cached_memory_int
+            except ValueError:
+                pass
+
+    # Remember current values for next time (only if non-default)
+    if gpu != "none":
+        smart_prompt.remember("gpu_type", gpu)
+    if memory != 4:
+        smart_prompt.remember("memory_gb", str(memory))
+    if workspace:
+        smart_prompt.remember("workspace", workspace)
 
     task_type_map = {
         "generic": TaskType.GENERIC,
@@ -923,18 +966,23 @@ def task_watch(
 
 
 @cli.command()
-@click.argument("session_id")
+@click.argument("session_id", required=False)
 @click.option("--info-only", is_flag=True, help="Show connection info without attaching")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--last", is_flag=True, help="Attach to most recent session")
 @pass_context
-def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> None:
+def attach(ctx: CLIContext, session_id: str | None, info_only: bool, as_json: bool, last: bool) -> None:
     """Attach to a running session via SSH/tmux.
 
     Implements [SPEC-12.10] Interactive Attach.
 
+    Smart defaults: If no session ID provided, suggests the most recently
+    attached or created session.
+
     Examples:
         parhelia attach task-abc123
         parhelia attach task-abc123 --info-only
+        parhelia attach --last       # Attach to most recent session
     """
     from parhelia.output_formatter import (
         ErrorCode,
@@ -945,6 +993,27 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
     from parhelia.ssh import AttachmentManager, SSHTunnelManager
 
     formatter = OutputFormatter(json_mode=as_json)
+
+    # Smart defaults (SPEC-20.50): Suggest most recent session
+    smart_prompt = get_smart_prompt()
+
+    # Handle --last flag or missing session_id
+    if last or not session_id:
+        cached_session = smart_prompt.get_default("last_session")
+
+        if last and cached_session:
+            session_id = cached_session
+            click.echo(StatusFormatter.info(f"Attaching to last session: {session_id}"))
+        elif not session_id:
+            if cached_session:
+                click.echo(StatusFormatter.info(f"Hint: Last session was {cached_session}"))
+                click.echo("Use 'parhelia attach --last' to attach to it, or specify a session ID.")
+            else:
+                click.echo(StatusFormatter.info("Hint: Use 'parhelia session list' to see available sessions."))
+            click.echo("")
+            suggestions = ErrorRecovery.suggest("E200")
+            click.echo(StatusFormatter.error("Session ID required", suggestions))
+            sys.exit(1)
 
     async def _attach():
         # Check if session/task exists
@@ -964,6 +1033,9 @@ def attach(ctx: CLIContext, session_id: str, info_only: bool, as_json: bool) -> 
                 suggestions = ErrorRecovery.suggest("E200", {"session_id": session_id})
                 click.echo(StatusFormatter.error(f"Session not found: {session_id}", suggestions))
             sys.exit(1)
+
+        # Remember this session for next time
+        smart_prompt.remember("last_session", session_id)
 
         # Check worker state
         if worker.state.value not in ("running", "idle"):
@@ -3734,6 +3806,140 @@ def _get_event_type_color(event_type: str) -> str:
         "heartbeat_missed": "yellow",
         "error": "red",
     }.get(event_type, "white")
+
+
+# =============================================================================
+# Help Command (SPEC-20.51)
+# =============================================================================
+
+
+@cli.command("help")
+@click.argument("topic", required=False)
+def help_cmd(topic: str | None) -> None:
+    """Get contextual help on topics and error codes.
+
+    Implements [SPEC-20.51] - Contextual Help System.
+
+    Provides detailed help for:
+    - Topics: task, session, container, checkpoint, budget, events, reconciler
+    - Error codes: E100-E599 (validation, resource, budget, auth, infra)
+
+    Examples:
+        parhelia help                 # List available topics
+        parhelia help task            # Help on task management
+        parhelia help session         # Help on sessions
+        parhelia help E200            # Help on SESSION_NOT_FOUND error
+        parhelia help E300            # Help on BUDGET_EXCEEDED error
+    """
+    help_sys = get_help_system()
+
+    if not topic:
+        # Show available topics
+        click.echo("Parhelia Help")
+        click.echo("=" * 60)
+        click.echo()
+        click.echo("Available topics:")
+        for t in help_sys.list_topics():
+            summary = help_sys.get_topic_summary(t)
+            if summary:
+                click.echo(f"  {t:<15} {summary.split(': ', 1)[1] if ': ' in summary else summary}")
+        click.echo()
+        click.echo("Error codes:")
+        click.echo("  E1xx           Validation errors")
+        click.echo("  E2xx           Resource errors (not found)")
+        click.echo("  E3xx           Budget errors")
+        click.echo("  E4xx           Authentication errors")
+        click.echo("  E5xx           Infrastructure errors")
+        click.echo()
+        click.echo("Usage:")
+        click.echo("  parhelia help <topic>      Show topic help")
+        click.echo("  parhelia help E200         Show error code help")
+        click.echo("  parhelia examples <topic>  Show examples")
+        return
+
+    # Check if it's an error code (starts with E followed by digits)
+    if topic.upper().startswith("E") and len(topic) >= 2 and topic[1:].isdigit():
+        error_help = help_sys.get_error_help(topic.upper())
+        if error_help:
+            click.echo(error_help)
+        else:
+            click.secho(f"Unknown error code: {topic}", fg="yellow")
+            click.echo()
+            click.echo("Known error code ranges:")
+            click.echo("  E100-E199: Validation errors")
+            click.echo("  E200-E299: Resource errors")
+            click.echo("  E300-E399: Budget errors")
+            click.echo("  E400-E499: Authentication errors")
+            click.echo("  E500-E599: Infrastructure errors")
+        return
+
+    # Otherwise treat as topic
+    topic_help = help_sys.get_topic_help(topic)
+    if topic_help:
+        click.echo(topic_help)
+    else:
+        click.secho(f"Unknown topic: {topic}", fg="yellow")
+        click.echo()
+        click.echo("Available topics:")
+        for t in help_sys.list_topics():
+            click.echo(f"  {t}")
+        click.echo()
+        click.echo("Use 'parhelia help <topic>' to see detailed help.")
+
+
+# =============================================================================
+# Examples Command (SPEC-20.52)
+# =============================================================================
+
+
+@cli.command("examples")
+@click.argument("topic", required=False)
+def examples_cmd(topic: str | None) -> None:
+    """Show example workflows for common tasks.
+
+    Implements [SPEC-20.52] - Example-based Documentation.
+
+    Provides copy-pasteable command examples for:
+    - gpu: GPU task creation and monitoring
+    - checkpoint: Checkpoint workflows
+    - budget: Budget management
+    - debug: Debugging failed tasks
+    - interactive: Interactive session workflows
+    - task: Basic task workflows
+    - workflow: Complete development workflows
+
+    Examples:
+        parhelia examples             # List available example topics
+        parhelia examples gpu         # GPU task examples
+        parhelia examples checkpoint  # Checkpoint examples
+        parhelia examples debug       # Debugging examples
+    """
+    example_sys = get_example_system()
+
+    if not topic:
+        # Show available topics
+        click.echo("Parhelia Examples")
+        click.echo("=" * 60)
+        click.echo()
+        click.echo("Available example topics:")
+        for t in example_sys.list_topics():
+            examples = example_sys.get_examples(t)
+            count = len(examples) if examples else 0
+            click.echo(f"  {t:<15} ({count} examples)")
+        click.echo()
+        click.echo("Usage:")
+        click.echo("  parhelia examples <topic>  Show examples for topic")
+        return
+
+    formatted = example_sys.format_examples(topic)
+    if formatted:
+        click.echo(formatted)
+    else:
+        click.secho(f"Unknown topic: {topic}", fg="yellow")
+        click.echo()
+        click.echo("Available topics:")
+        for t in example_sys.list_topics():
+            click.echo(f"  {t}")
 
 
 # =============================================================================
