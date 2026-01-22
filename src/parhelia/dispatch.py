@@ -462,6 +462,7 @@ class TaskDispatcher:
     ) -> str:
         """Run Claude Code and wait for completion."""
         from parhelia.modal_app import run_in_sandbox
+        from parhelia.permissions import TrustLevel
 
         # Build Claude command
         # Use -p for non-interactive print mode with prompt
@@ -471,6 +472,11 @@ class TaskDispatcher:
             task.prompt,
             "--max-turns", "10",  # Reasonable limit for autonomous work
         ]
+
+        # For automated tasks, skip permission prompts (runs in sandboxed environment)
+        # Implements [SPEC-04.13]
+        if task.trust_level == TrustLevel.AUTOMATED:
+            cmd.append("--dangerously-skip-permissions")
 
         # Add working directory if specified
         if task.requirements.working_directory:

@@ -72,6 +72,7 @@ from parhelia.environment import (
 )
 from parhelia.heartbeat import HeartbeatMonitor
 from parhelia.orchestrator import Task, TaskRequirements, TaskType
+from parhelia.permissions import TrustLevel
 from parhelia.persistence import PersistentOrchestrator
 from parhelia.reconciler import ContainerReconciler, RealModalClient, ReconcilerConfig
 from parhelia.resume import ResumeManager
@@ -545,6 +546,11 @@ def list_sessions(ctx: CLIContext, status: str, limit: int) -> None:
     is_flag=True,
     help="Skip actual Modal execution (for testing)",
 )
+@click.option(
+    "--automated",
+    is_flag=True,
+    help="Run in automated mode (skip permission prompts). Use for CI/headless execution.",
+)
 @pass_context
 def submit(
     ctx: CLIContext,
@@ -556,6 +562,7 @@ def submit(
     dispatch: bool,
     sync: bool,
     dry_run: bool,
+    automated: bool,
 ) -> None:
     """Submit a new task for execution.
 
@@ -563,6 +570,7 @@ def submit(
     Use --no-dispatch to only persist the task without execution.
     Use --sync to wait for completion.
     Use --dry-run to test without Modal.
+    Use --automated for headless/CI execution (skips permission prompts).
 
     Smart defaults: GPU type, memory, and workspace are remembered from
     previous invocations and used as defaults for future tasks.
@@ -622,6 +630,7 @@ def submit(
             min_memory_gb=memory,
             working_directory=workspace,
         ),
+        trust_level=TrustLevel.AUTOMATED if automated else TrustLevel.INTERACTIVE,
     )
 
     async def _submit_and_dispatch():

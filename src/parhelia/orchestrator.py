@@ -13,6 +13,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
+from parhelia.permissions import TrustLevel
+
 
 class TaskType(Enum):
     """Types of tasks the orchestrator handles.
@@ -72,6 +74,7 @@ class Task:
     parent_id: str | None = None  # For subtasks
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+    trust_level: TrustLevel = TrustLevel.INTERACTIVE  # [SPEC-04.13]
 
 
 @dataclass

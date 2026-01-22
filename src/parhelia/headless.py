@@ -3,6 +3,7 @@
 Implements:
 - [SPEC-02.10] Session Identification
 - [SPEC-02.13] Headless Execution
+- [SPEC-04.13] Permission Model for Remote Execution
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+from parhelia.permissions import TrustLevel
 
 
 def generate_session_id(task_id: str, prefix: str = "ph") -> str:
@@ -44,16 +47,18 @@ def build_headless_command(
     max_turns: int = 50,
     allowed_tools: list[str] | None = None,
     working_dir: str | None = None,
+    trust_level: TrustLevel = TrustLevel.INTERACTIVE,
 ) -> list[str]:
     """Build command for headless Claude Code execution.
 
-    Implements [SPEC-02.13].
+    Implements [SPEC-02.13] and [SPEC-04.13].
 
     Args:
         prompt: The task prompt for Claude.
         max_turns: Maximum conversation turns (default: 50).
         allowed_tools: Optional list of allowed tools.
         working_dir: Working directory (handled externally by tmux).
+        trust_level: Trust level for execution (INTERACTIVE or AUTOMATED).
 
     Returns:
         Command list suitable for subprocess execution.
@@ -70,6 +75,11 @@ def build_headless_command(
 
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+
+    # In sandboxed Modal environment, skip permissions for automated tasks
+    # Implements [SPEC-04.13]
+    if trust_level == TrustLevel.AUTOMATED:
+        cmd.append("--dangerously-skip-permissions")
 
     return cmd
 
