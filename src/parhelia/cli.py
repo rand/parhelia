@@ -42,7 +42,7 @@ import asyncio
 import difflib
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,7 @@ GROUP_ALIASES: dict[str, str] = {
     "c": "container",
     "b": "budget",
     "r": "reconciler",
+    "e": "events",  # Wave 5: Events streaming
 }
 
 # Maps legacy root commands to new noun-verb equivalents
@@ -3208,6 +3209,531 @@ def cleanup(ctx: CLIContext, dry_run: bool, force: bool, as_json: bool) -> None:
                 click.secho("\n⚠ Some containers may still be running. Check Modal dashboard.", fg="yellow")
     except Exception as e:
         click.secho(f"Could not verify cleanup: {e}", fg="yellow")
+
+
+# =============================================================================
+# Events Command Group (SPEC-20 P4)
+# =============================================================================
+
+
+@cli.group(cls=AliasGroup, aliases={"ls": "list", "w": "watch", "r": "replay"})
+def events() -> None:
+    """Event streaming and history commands.
+
+    Implements [SPEC-20.40] Real-Time Events.
+
+    View, filter, and export control plane events.
+
+    Aliases:
+        e -> events
+    """
+    pass
+
+
+# Add events alias to GROUP_ALIASES at the top of file through import modification
+# This is handled by the GROUP_ALIASES dict which already maps 'e' -> 'events' if added
+
+
+@events.command("list")
+@click.option(
+    "--type", "event_type",
+    type=click.Choice([
+        "container_created", "container_started", "container_stopped",
+        "container_terminated", "container_healthy", "container_degraded",
+        "container_unhealthy", "container_dead", "container_recovered",
+        "orphan_detected", "state_drift_corrected", "reconcile_failed",
+        "heartbeat_received", "heartbeat_missed", "error",
+    ]),
+    help="Filter by event type",
+)
+@click.option(
+    "--level",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    help="Filter by severity level",
+)
+@click.option(
+    "--since",
+    help="Only events after this time (e.g., '1h', '30m', '2024-01-21T10:00:00')",
+)
+@click.option(
+    "--container", "container_id",
+    help="Filter by container ID",
+)
+@click.option(
+    "--task", "task_id",
+    help="Filter by task ID",
+)
+@click.option("--limit", default=50, help="Maximum events to show")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def events_list(
+    ctx: CLIContext,
+    event_type: str | None,
+    level: str | None,
+    since: str | None,
+    container_id: str | None,
+    task_id: str | None,
+    limit: int,
+    as_json: bool,
+) -> None:
+    """List events with optional filtering.
+
+    Examples:
+        parhelia events list
+        parhelia events list --type error
+        parhelia events list --level warning --since 1h
+        parhelia events list --container c-abc123
+        parhelia e ls --json
+    """
+    from parhelia.events import EventFilter
+
+    store = ctx.state_store
+
+    # Parse since argument
+    since_dt = None
+    if since:
+        since_dt = _parse_time_arg(since)
+
+    # Build filter
+    event_types = None
+    if event_type:
+        event_types = [EventType(event_type)]
+
+    levels = None
+    if level:
+        levels = [level]
+
+    filter = EventFilter(
+        event_types=event_types,
+        levels=levels,
+        container_id=container_id,
+        task_id=task_id,
+        since=since_dt,
+    )
+
+    # Query events
+    events = store.get_events(
+        container_id=container_id,
+        task_id=task_id,
+        event_type=EventType(event_type) if event_type else None,
+        since=since_dt,
+        limit=limit,
+    )
+
+    # Apply additional filtering (levels)
+    if level:
+        events = [e for e in events if filter.matches(e)]
+
+    if as_json:
+        data = {
+            "events": [
+                {
+                    "id": e.id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "event_type": e.event_type.value,
+                    "container_id": e.container_id,
+                    "task_id": e.task_id,
+                    "message": e.message,
+                    "source": e.source,
+                }
+                for e in events
+            ],
+            "count": len(events),
+            "filter": filter.to_dict(),
+        }
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    if not events:
+        click.echo("No events found matching criteria.")
+        return
+
+    click.echo(f"Events ({len(events)} shown)")
+    click.echo("=" * 80)
+
+    for e in events:
+        time_str = e.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        type_color = _get_event_type_color(e.event_type.value)
+
+        msg = e.message or "-"
+        if len(msg) > 50:
+            msg = msg[:47] + "..."
+
+        click.echo(
+            f"[{time_str}] "
+            f"{click.style(e.event_type.value, fg=type_color):<24} "
+            f"{(e.container_id or '-'):<12} "
+            f"{msg}"
+        )
+
+
+@events.command("watch")
+@click.option(
+    "--type", "event_type",
+    type=click.Choice([
+        "container_created", "container_started", "container_stopped",
+        "container_terminated", "container_healthy", "container_degraded",
+        "container_unhealthy", "container_dead", "container_recovered",
+        "orphan_detected", "state_drift_corrected", "reconcile_failed",
+        "heartbeat_received", "heartbeat_missed", "error",
+    ]),
+    help="Filter by event type",
+)
+@click.option(
+    "--level",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    help="Filter by severity level",
+)
+@click.option(
+    "--quiet", "-q",
+    is_flag=True,
+    help="Quiet mode - only show completion events",
+)
+@click.option(
+    "--container", "container_id",
+    help="Filter by container ID",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON lines")
+@pass_context
+def events_watch(
+    ctx: CLIContext,
+    event_type: str | None,
+    level: str | None,
+    quiet: bool,
+    container_id: str | None,
+    as_json: bool,
+) -> None:
+    """Watch events in real-time.
+
+    Streams events as they occur. Press Ctrl+C to stop.
+
+    Examples:
+        parhelia events watch
+        parhelia events watch --type error
+        parhelia events watch --level warning
+        parhelia events watch --quiet  # Only completion events
+        parhelia e w --json
+    """
+    from parhelia.events import EventFilter, EventLogger
+
+    if not as_json:
+        click.echo("Watching events (Ctrl+C to stop)...")
+        click.echo("")
+
+    store = ctx.state_store
+
+    # Build filter
+    event_types = None
+    if event_type:
+        event_types = [EventType(event_type)]
+    elif quiet:
+        # Quiet mode: only lifecycle completion events
+        event_types = [
+            EventType.CONTAINER_STOPPED,
+            EventType.CONTAINER_TERMINATED,
+        ]
+
+    levels = None
+    if level:
+        levels = [level]
+
+    filter = EventFilter(
+        event_types=event_types,
+        levels=levels,
+        container_id=container_id,
+    )
+
+    # Poll for new events
+    import time
+
+    last_event_id = 0
+
+    # Get the latest event ID to start from
+    recent = store.get_events(limit=1)
+    if recent:
+        last_event_id = recent[0].id or 0
+
+    try:
+        while True:
+            # Get new events since last seen
+            events = store.get_events(limit=50)
+
+            # Filter to new events
+            new_events = [e for e in events if (e.id or 0) > last_event_id]
+            new_events.reverse()  # Show oldest first
+
+            for e in new_events:
+                if filter.matches(e):
+                    if as_json:
+                        data = {
+                            "id": e.id,
+                            "timestamp": e.timestamp.isoformat(),
+                            "event_type": e.event_type.value,
+                            "container_id": e.container_id,
+                            "task_id": e.task_id,
+                            "message": e.message,
+                            "source": e.source,
+                        }
+                        click.echo(json.dumps(data))
+                    else:
+                        time_str = e.timestamp.strftime("%H:%M:%S")
+                        type_color = _get_event_type_color(e.event_type.value)
+                        msg = e.message or "-"
+                        click.echo(
+                            f"[{time_str}] "
+                            f"{click.style(e.event_type.value, fg=type_color)}: "
+                            f"{msg}"
+                        )
+
+                last_event_id = max(last_event_id, e.id or 0)
+
+            time.sleep(0.5)  # <500ms latency requirement
+
+    except KeyboardInterrupt:
+        if not as_json:
+            click.echo("\nStopped watching.")
+
+
+@events.command("replay")
+@click.argument("container_id")
+@click.option(
+    "--from-start",
+    is_flag=True,
+    help="Replay from container creation",
+)
+@click.option(
+    "--since",
+    help="Replay from this time (e.g., '1h', '30m', or ISO timestamp)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def events_replay(
+    ctx: CLIContext,
+    container_id: str,
+    from_start: bool,
+    since: str | None,
+    as_json: bool,
+) -> None:
+    """Replay historical events for a container.
+
+    Shows events in chronological order to understand what happened.
+
+    Examples:
+        parhelia events replay c-abc12345
+        parhelia events replay c-abc12345 --from-start
+        parhelia events replay c-abc12345 --since 2h
+        parhelia e r c-abc12345 --json
+    """
+    from parhelia.events import EventLogger
+
+    store = ctx.state_store
+
+    # Parse since argument
+    since_dt = None
+    if since and not from_start:
+        since_dt = _parse_time_arg(since)
+
+    # Get events
+    events = store.get_events(
+        container_id=container_id,
+        since=since_dt if not from_start else None,
+        limit=1000,
+    )
+
+    # Sort chronologically
+    events.sort(key=lambda e: e.timestamp)
+
+    if as_json:
+        data = {
+            "container_id": container_id,
+            "events": [
+                {
+                    "id": e.id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "event_type": e.event_type.value,
+                    "message": e.message,
+                    "old_value": e.old_value,
+                    "new_value": e.new_value,
+                    "source": e.source,
+                    "details": e.details,
+                }
+                for e in events
+            ],
+            "count": len(events),
+            "from_start": from_start,
+        }
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    if not events:
+        click.echo(f"No events found for container: {container_id}")
+        return
+
+    click.echo(f"Event Replay: {container_id}")
+    click.echo(f"Period: {events[0].timestamp.strftime('%Y-%m-%d %H:%M:%S')} to {events[-1].timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+    click.echo("=" * 80)
+
+    for e in events:
+        time_str = e.timestamp.strftime("%H:%M:%S")
+        type_color = _get_event_type_color(e.event_type.value)
+
+        # Format the event message
+        msg = e.message or ""
+        if e.old_value and e.new_value:
+            msg = f"{e.old_value} -> {e.new_value}"
+            if e.message:
+                msg = f"{e.message} ({msg})"
+
+        click.echo(
+            f"[{time_str}] "
+            f"{click.style(e.event_type.value, fg=type_color)}: "
+            f"{msg or '-'}"
+        )
+
+
+@events.command("export")
+@click.argument("output_file")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["jsonl", "json"]),
+    default="jsonl",
+    help="Output format (default: jsonl)",
+)
+@click.option(
+    "--since",
+    help="Export events after this time",
+)
+@click.option(
+    "--until",
+    help="Export events before this time",
+)
+@click.option(
+    "--container", "container_id",
+    help="Filter by container ID",
+)
+@click.option(
+    "--type", "event_type",
+    help="Filter by event type",
+)
+@pass_context
+def events_export(
+    ctx: CLIContext,
+    output_file: str,
+    output_format: str,
+    since: str | None,
+    until: str | None,
+    container_id: str | None,
+    event_type: str | None,
+) -> None:
+    """Export events to file.
+
+    Supports JSONL (JSON Lines) and JSON array formats.
+
+    Examples:
+        parhelia events export events.jsonl
+        parhelia events export events.json --format json
+        parhelia events export errors.jsonl --type error
+        parhelia events export today.jsonl --since 24h
+    """
+    from parhelia.events import EventExporter, EventFilter
+
+    store = ctx.state_store
+
+    # Parse time arguments
+    since_dt = _parse_time_arg(since) if since else None
+    until_dt = _parse_time_arg(until) if until else None
+
+    # Build filter
+    event_types = [EventType(event_type)] if event_type else None
+
+    filter = EventFilter(
+        event_types=event_types,
+        container_id=container_id,
+        since=since_dt,
+        until=until_dt,
+    )
+
+    # Get events
+    events = store.get_events(
+        container_id=container_id,
+        event_type=EventType(event_type) if event_type else None,
+        since=since_dt,
+        until=until_dt,
+        limit=10000,  # Large limit for export
+    )
+
+    # Apply additional filtering
+    events = [e for e in events if filter.matches(e)]
+
+    # Sort chronologically
+    events.sort(key=lambda e: e.timestamp)
+
+    # Export
+    exporter = EventExporter()
+
+    if output_format == "jsonl":
+        count = exporter.to_jsonl(events, output_file)
+    else:
+        json_str = exporter.to_json(events)
+        with open(output_file, "w") as f:
+            f.write(json_str)
+        count = len(events)
+
+    click.secho(f"Exported {count} events to {output_file}", fg="green")
+
+
+def _parse_time_arg(time_str: str) -> datetime:
+    """Parse a time argument into a datetime.
+
+    Supports:
+    - Relative times: '1h', '30m', '2d', '1w'
+    - ISO timestamps: '2024-01-21T10:00:00'
+    """
+    if not time_str:
+        return datetime.utcnow()
+
+    # Check for relative time
+    if time_str[-1] in "smhdw":
+        try:
+            value = int(time_str[:-1])
+            unit = time_str[-1]
+            deltas = {
+                "s": timedelta(seconds=value),
+                "m": timedelta(minutes=value),
+                "h": timedelta(hours=value),
+                "d": timedelta(days=value),
+                "w": timedelta(weeks=value),
+            }
+            return datetime.utcnow() - deltas[unit]
+        except (ValueError, KeyError):
+            pass
+
+    # Try ISO format
+    try:
+        return datetime.fromisoformat(time_str)
+    except ValueError:
+        raise click.BadParameter(f"Invalid time format: {time_str}")
+
+
+def _get_event_type_color(event_type: str) -> str:
+    """Get color for event type display."""
+    return {
+        "container_created": "cyan",
+        "container_started": "green",
+        "container_stopped": "yellow",
+        "container_terminated": "white",
+        "container_healthy": "green",
+        "container_degraded": "yellow",
+        "container_unhealthy": "red",
+        "container_dead": "red",
+        "container_recovered": "green",
+        "orphan_detected": "red",
+        "state_drift_corrected": "yellow",
+        "reconcile_failed": "red",
+        "heartbeat_received": "white",
+        "heartbeat_missed": "yellow",
+        "error": "red",
+    }.get(event_type, "white")
 
 
 # =============================================================================

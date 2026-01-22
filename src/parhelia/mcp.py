@@ -181,6 +181,8 @@ class ParheliaMCPTools:
         self._register_checkpoint_tools()
         # Budget tools
         self._register_budget_tools()
+        # Event streaming tools (Wave 5)
+        self._register_event_tools()
 
     def get_tools(self) -> list[dict[str, Any]]:
         """Get tool definitions for MCP protocol.
@@ -1367,4 +1369,359 @@ class ParheliaMCPTools:
             **estimate,
             "within_budget": within_budget,
             "remaining_budget_usd": status.remaining_usd,
+        }
+
+    # =========================================================================
+    # Event Streaming Tools (Wave 5)
+    # =========================================================================
+
+    def _register_event_tools(self) -> None:
+        """Register event streaming MCP tools."""
+
+        self._tools["parhelia_events_subscribe"] = MCPToolDefinition(
+            name="parhelia_events_subscribe",
+            description="Subscribe to real-time event stream. Returns subscription ID for use with parhelia_events_stream.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "event_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter to specific event types (e.g., ['container_started', 'error'])",
+                    },
+                    "levels": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["debug", "info", "warning", "error"]},
+                        "description": "Filter by severity levels",
+                    },
+                    "container_id": {
+                        "type": "string",
+                        "description": "Filter to specific container",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Filter to specific task",
+                    },
+                },
+            },
+            handler=self._handle_events_subscribe,
+        )
+
+        self._tools["parhelia_events_stream"] = MCPToolDefinition(
+            name="parhelia_events_stream",
+            description="Get next events from a subscription. Returns events with <500ms latency.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {
+                        "type": "string",
+                        "description": "Subscription ID from parhelia_events_subscribe",
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "How long to wait for events (default: 30, max: 60)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum events to return (default: 10)",
+                    },
+                },
+                "required": ["subscription_id"],
+            },
+            handler=self._handle_events_stream,
+        )
+
+        self._tools["parhelia_events_unsubscribe"] = MCPToolDefinition(
+            name="parhelia_events_unsubscribe",
+            description="Cancel an event subscription.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {
+                        "type": "string",
+                        "description": "Subscription ID to cancel",
+                    },
+                },
+                "required": ["subscription_id"],
+            },
+            handler=self._handle_events_unsubscribe,
+        )
+
+        self._tools["parhelia_events_list"] = MCPToolDefinition(
+            name="parhelia_events_list",
+            description="Query historical events with filtering.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "container_id": {
+                        "type": "string",
+                        "description": "Filter by container ID",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Filter by task ID",
+                    },
+                    "event_type": {
+                        "type": "string",
+                        "description": "Filter by event type",
+                    },
+                    "since_minutes": {
+                        "type": "integer",
+                        "description": "Only events from last N minutes",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum events to return (default: 50)",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific fields to return (reduces response size)",
+                    },
+                },
+            },
+            handler=self._handle_events_list,
+        )
+
+        self._tools["parhelia_events_replay"] = MCPToolDefinition(
+            name="parhelia_events_replay",
+            description="Replay historical events for a container in chronological order.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "container_id": {
+                        "type": "string",
+                        "description": "Container ID to replay events for",
+                    },
+                    "from_start": {
+                        "type": "boolean",
+                        "description": "Start from container creation (default: true)",
+                    },
+                    "since_minutes": {
+                        "type": "integer",
+                        "description": "Only events from last N minutes (ignored if from_start)",
+                    },
+                },
+                "required": ["container_id"],
+            },
+            handler=self._handle_events_replay,
+        )
+
+    async def _handle_events_subscribe(
+        self,
+        event_types: list[str] | None = None,
+        levels: list[str] | None = None,
+        container_id: str | None = None,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Handle parhelia_events_subscribe tool call."""
+        from parhelia.events import EventFilter, EventLogger, SubscriptionManager
+
+        # Create filter
+        parsed_event_types = None
+        if event_types:
+            parsed_event_types = [EventType(t) for t in event_types]
+
+        filter = EventFilter(
+            event_types=parsed_event_types,
+            levels=levels,
+            container_id=container_id,
+            task_id=task_id,
+        )
+
+        # Get or create subscription manager
+        if not hasattr(self, "_subscription_manager"):
+            logger = EventLogger(self.state_store)
+            self._subscription_manager = SubscriptionManager(logger)
+
+        # Create subscription
+        subscription = self._subscription_manager.subscribe(filter)
+
+        return {
+            "success": True,
+            "subscription_id": subscription.id,
+            "filter": filter.to_dict(),
+            "created_at": subscription.created_at.isoformat(),
+            "message": "Subscription created. Use parhelia_events_stream to receive events.",
+            "next_actions": [
+                {
+                    "action": "stream",
+                    "description": "Get next events",
+                    "tool": "parhelia_events_stream",
+                    "args": {"subscription_id": subscription.id},
+                },
+            ],
+        }
+
+    async def _handle_events_stream(
+        self,
+        subscription_id: str,
+        timeout_seconds: float = 30.0,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Handle parhelia_events_stream tool call."""
+        if not hasattr(self, "_subscription_manager"):
+            return {
+                "success": False,
+                "error": "No subscriptions exist. Use parhelia_events_subscribe first.",
+            }
+
+        subscription = self._subscription_manager.get_subscription(subscription_id)
+        if not subscription:
+            return {
+                "success": False,
+                "error": f"Subscription not found: {subscription_id}",
+                "suggestion": "Create a new subscription with parhelia_events_subscribe",
+            }
+
+        # Clamp timeout
+        timeout_seconds = min(max(timeout_seconds, 1.0), 60.0)
+
+        # Collect events
+        events = []
+        start_time = datetime.utcnow()
+
+        while len(events) < limit:
+            elapsed = (datetime.utcnow() - start_time).total_seconds()
+            remaining = timeout_seconds - elapsed
+
+            if remaining <= 0:
+                break
+
+            event = await self._subscription_manager.get_next_event(
+                subscription_id,
+                timeout=min(remaining, 0.5),  # Check every 500ms for <500ms latency
+            )
+
+            if event:
+                events.append({
+                    "id": event.id,
+                    "timestamp": event.timestamp.isoformat(),
+                    "event_type": event.event_type.value,
+                    "container_id": event.container_id,
+                    "task_id": event.task_id,
+                    "message": event.message,
+                    "source": event.source,
+                })
+
+        return {
+            "success": True,
+            "subscription_id": subscription_id,
+            "events": events,
+            "count": len(events),
+            "has_more": not subscription.listener.empty(),
+        }
+
+    async def _handle_events_unsubscribe(
+        self,
+        subscription_id: str,
+    ) -> dict[str, Any]:
+        """Handle parhelia_events_unsubscribe tool call."""
+        if not hasattr(self, "_subscription_manager"):
+            return {
+                "success": False,
+                "error": "No subscriptions exist.",
+            }
+
+        success = self._subscription_manager.unsubscribe(subscription_id)
+
+        if success:
+            return {
+                "success": True,
+                "subscription_id": subscription_id,
+                "message": "Subscription cancelled",
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Subscription not found: {subscription_id}",
+            }
+
+    async def _handle_events_list(
+        self,
+        container_id: str | None = None,
+        task_id: str | None = None,
+        event_type: str | None = None,
+        since_minutes: int | None = None,
+        limit: int = 50,
+        fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Handle parhelia_events_list tool call."""
+        from datetime import timedelta
+
+        # Build query
+        since = None
+        if since_minutes:
+            since = datetime.utcnow() - timedelta(minutes=since_minutes)
+
+        evt_type = EventType(event_type) if event_type else None
+
+        events = self.state_store.get_events(
+            container_id=container_id,
+            task_id=task_id,
+            event_type=evt_type,
+            since=since,
+            limit=limit,
+        )
+
+        event_data = []
+        for e in events:
+            item = {
+                "id": e.id,
+                "timestamp": e.timestamp.isoformat(),
+                "event_type": e.event_type.value,
+                "container_id": e.container_id,
+                "task_id": e.task_id,
+                "message": e.message,
+                "source": e.source,
+            }
+            event_data.append(filter_fields(item, fields))
+
+        return {
+            "success": True,
+            "events": event_data,
+            "count": len(event_data),
+        }
+
+    async def _handle_events_replay(
+        self,
+        container_id: str,
+        from_start: bool = True,
+        since_minutes: int | None = None,
+    ) -> dict[str, Any]:
+        """Handle parhelia_events_replay tool call."""
+        from datetime import timedelta
+        from parhelia.events import EventLogger
+
+        logger = EventLogger(self.state_store)
+
+        since = None
+        if not from_start and since_minutes:
+            since = datetime.utcnow() - timedelta(minutes=since_minutes)
+
+        events = logger.replay(
+            container_id=container_id,
+            from_start=from_start,
+            since=since,
+        )
+
+        event_data = [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp.isoformat(),
+                "event_type": e.event_type.value,
+                "message": e.message,
+                "old_value": e.old_value,
+                "new_value": e.new_value,
+                "source": e.source,
+            }
+            for e in events
+        ]
+
+        return {
+            "success": True,
+            "container_id": container_id,
+            "events": event_data,
+            "count": len(event_data),
+            "from_start": from_start,
         }
