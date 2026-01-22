@@ -691,6 +691,82 @@ def task() -> None:
     pass
 
 
+@task.command("list")
+@click.option(
+    "-s", "--status",
+    type=click.Choice(["all", "pending", "running", "completed", "failed"]),
+    default="all",
+    help="Filter by status",
+)
+@click.option(
+    "-n", "--limit",
+    type=int,
+    default=20,
+    help="Maximum number of items to show",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@pass_context
+def task_list(ctx: CLIContext, status: str, limit: int, as_json: bool) -> None:
+    """List tasks with optional filtering.
+
+    Examples:
+        parhelia task list
+        parhelia task list --status pending
+        parhelia task list --status running --limit 5
+    """
+
+    async def _list():
+        if status == "all":
+            tasks = await ctx.orchestrator.get_all_tasks(limit)
+        elif status == "pending":
+            tasks = await ctx.orchestrator.get_pending_tasks()
+        elif status == "running":
+            tasks = await ctx.orchestrator.get_running_tasks()
+        else:
+            tasks = await ctx.orchestrator.get_all_tasks(limit)
+            tasks = [t for t in tasks if ctx.orchestrator.task_store.get_status(t.id) == status]
+
+        tasks = tasks[:limit]
+
+        if as_json:
+            import json
+            click.echo(json.dumps([
+                {
+                    "id": t.id,
+                    "status": ctx.orchestrator.task_store.get_status(t.id),
+                    "type": t.task_type.value,
+                    "created_at": t.created_at.isoformat(),
+                }
+                for t in tasks
+            ], indent=2))
+            return
+
+        if not tasks:
+            click.echo("No tasks found.")
+            return
+
+        click.echo(f"{'ID':<20} {'Status':<12} {'Type':<12} {'Created':<20}")
+        click.echo("-" * 70)
+
+        for t in tasks:
+            task_status = ctx.orchestrator.task_store.get_status(t.id) or "unknown"
+            status_color = {
+                "pending": "yellow",
+                "running": "green",
+                "completed": "blue",
+                "failed": "red",
+            }.get(task_status, "white")
+
+            click.echo(
+                f"{t.id:<20} "
+                f"{click.style(task_status, fg=status_color):<12} "
+                f"{t.task_type.value:<12} "
+                f"{t.created_at.strftime('%Y-%m-%d %H:%M'):<20}"
+            )
+
+    asyncio.run(_list())
+
+
 @task.command("show")
 @click.argument("task_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
