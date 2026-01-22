@@ -767,6 +767,125 @@ def task_list(ctx: CLIContext, status: str, limit: int, as_json: bool) -> None:
     asyncio.run(_list())
 
 
+@task.command("delete")
+@click.argument("task_ids", nargs=-1, required=True)
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation")
+@pass_context
+def task_delete(ctx: CLIContext, task_ids: tuple[str, ...], force: bool) -> None:
+    """Delete one or more tasks.
+
+    Only pending and failed tasks can be deleted. Running tasks must be
+    cancelled first.
+
+    Examples:
+        parhelia task delete task-abc123
+        parhelia task delete task-abc123 task-def456
+        parhelia task delete task-abc123 --force
+    """
+
+    async def _delete():
+        deleted = 0
+        skipped = 0
+
+        for task_id in task_ids:
+            task = await ctx.orchestrator.get_task(task_id)
+            if not task:
+                click.secho(f"Task not found: {task_id}", fg="yellow")
+                skipped += 1
+                continue
+
+            status = ctx.orchestrator.task_store.get_status(task_id)
+            if status == "running":
+                click.secho(f"Cannot delete running task: {task_id} (cancel it first)", fg="red")
+                skipped += 1
+                continue
+
+            if not force:
+                click.echo(f"Delete {task_id} ({status}, {task.task_type.value})?")
+                if not click.confirm("Confirm"):
+                    skipped += 1
+                    continue
+
+            ctx.orchestrator.task_store.delete(task_id)
+            click.secho(f"Deleted: {task_id}", fg="green")
+            deleted += 1
+
+        click.echo(f"\nDeleted {deleted} task(s), skipped {skipped}")
+
+    asyncio.run(_delete())
+
+
+@task.command("cleanup")
+@click.option(
+    "--status",
+    type=click.Choice(["pending", "failed", "completed", "all"]),
+    default="pending",
+    help="Status of tasks to clean up (default: pending)",
+)
+@click.option("--older-than", type=int, help="Only delete tasks older than N hours")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation")
+@pass_context
+def task_cleanup(
+    ctx: CLIContext, status: str, older_than: int | None, dry_run: bool, force: bool
+) -> None:
+    """Clean up old or test tasks.
+
+    Examples:
+        parhelia task cleanup                    # Delete all pending tasks
+        parhelia task cleanup --status failed    # Delete failed tasks
+        parhelia task cleanup --older-than 24    # Delete pending tasks > 24h old
+        parhelia task cleanup --dry-run          # Preview what would be deleted
+    """
+    from datetime import datetime, timedelta
+
+    async def _cleanup():
+        if status == "all":
+            tasks = await ctx.orchestrator.get_all_tasks(1000)
+        elif status == "pending":
+            tasks = await ctx.orchestrator.get_pending_tasks()
+        elif status == "running":
+            click.secho("Cannot cleanup running tasks. Use 'task cancel' first.", fg="red")
+            return
+        else:
+            tasks = await ctx.orchestrator.get_all_tasks(1000)
+            tasks = [t for t in tasks if ctx.orchestrator.task_store.get_status(t.id) == status]
+
+        # Filter by age if specified
+        if older_than:
+            cutoff = datetime.now() - timedelta(hours=older_than)
+            tasks = [t for t in tasks if t.created_at < cutoff]
+
+        if not tasks:
+            click.echo("No tasks to clean up.")
+            return
+
+        click.echo(f"Found {len(tasks)} task(s) to clean up:")
+        for t in tasks[:10]:
+            task_status = ctx.orchestrator.task_store.get_status(t.id)
+            click.echo(f"  {t.id} ({task_status}, {t.created_at.strftime('%Y-%m-%d %H:%M')})")
+        if len(tasks) > 10:
+            click.echo(f"  ... and {len(tasks) - 10} more")
+
+        if dry_run:
+            click.echo("\n(dry-run, no changes made)")
+            return
+
+        if not force:
+            if not click.confirm(f"\nDelete {len(tasks)} task(s)?"):
+                click.echo("Cancelled.")
+                return
+
+        deleted = 0
+        for t in tasks:
+            ctx.orchestrator.task_store.delete(t.id)
+            deleted += 1
+
+        click.secho(f"\nDeleted {deleted} task(s).", fg="green")
+
+    asyncio.run(_cleanup())
+
+
 @task.command("show")
 @click.argument("task_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
