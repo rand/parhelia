@@ -121,20 +121,48 @@ Claude Code usage is billed separately through your Anthropic account:
 
 ## 4. Monitoring & Alerting
 
-### 4.1 Built-in Monitoring
+### 4.1 Built-in CLI Monitoring
+
+Parhelia provides comprehensive CLI commands for monitoring:
+
+```bash
+# System health overview
+parhelia status
+
+# Container monitoring
+parhelia container list                    # List all containers
+parhelia container list --state running    # Filter by state
+parhelia container health                  # Health summary
+parhelia container watch                   # Real-time updates
+
+# Event monitoring
+parhelia events list                       # Recent events
+parhelia events list --level error         # Errors only
+parhelia events watch                      # Real-time stream
+
+# Reconciler status
+parhelia reconciler status                 # Drift detection state
+parhelia reconciler run                    # Force reconciliation
+
+# Budget monitoring
+parhelia budget show                       # Current spending
+parhelia budget history                    # Usage over time
+```
+
+### 4.2 Modal Dashboard
 
 - **Health Check**: `modal run src/parhelia/modal_app.py::health_check`
 - **E2E Tests**: Daily automated validation
 - **GitHub Issues**: Auto-created on CI failures
 
-### 4.2 Recommended Alerts
+### 4.3 Recommended Alerts
 
 Set up in Modal dashboard:
 1. Spending threshold alerts (e.g., 80% of budget)
 2. Error rate alerts (sandbox failures)
 3. Function timeout alerts
 
-### 4.3 Log Access
+### 4.4 Log Access
 
 ```bash
 # View recent function logs
@@ -202,9 +230,20 @@ anthropic_key_set: false
 
 ### 6.2 Debug Mode
 
-Run tasks with dry-run to debug without Modal:
+Use CLI commands to inspect system state:
 ```bash
-parhelia submit "test prompt" --dry-run
+# Check system health
+parhelia status
+
+# View container state
+parhelia container list
+parhelia container show <container-id>
+
+# Check events for issues
+parhelia events list --level error
+
+# View reconciler status
+parhelia reconciler status
 ```
 
 ### 6.3 Manual Health Check
@@ -298,7 +337,42 @@ git checkout v1.0.0
 modal deploy src/parhelia/modal_app.py --tag rollback-$(date +%Y%m%d)
 ```
 
-## 10. Support
+## 10. MCP Integration
+
+Parhelia exposes 24 MCP tools for programmatic integration:
+
+```bash
+# Start MCP server
+parhelia mcp-server
+```
+
+### 10.1 Available Tools
+
+| Category | Tools |
+|----------|-------|
+| **Tasks** | `parhelia_task_create`, `parhelia_task_list`, `parhelia_task_show`, `parhelia_task_dispatch` |
+| **Containers** | `parhelia_containers`, `parhelia_container_show`, `parhelia_container_events` |
+| **Events** | `parhelia_events_list`, `parhelia_events_subscribe`, `parhelia_events_stream` |
+| **Checkpoints** | `parhelia_checkpoint_create`, `parhelia_checkpoint_list`, `parhelia_checkpoint_restore` |
+| **Budget** | `parhelia_budget_status`, `parhelia_budget_estimate` |
+| **System** | `parhelia_health`, `parhelia_reconciler_status` |
+
+### 10.2 Claude Code Integration
+
+Add Parhelia to Claude Code's MCP config for AI-assisted task management:
+
+```json
+{
+  "mcpServers": {
+    "parhelia": {
+      "command": "parhelia",
+      "args": ["mcp-server"]
+    }
+  }
+}
+```
+
+## 11. Support
 
 - **Issues**: https://github.com/rand/parhelia/issues
 - **Modal Docs**: https://modal.com/docs
