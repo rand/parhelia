@@ -79,11 +79,11 @@ parhelia budget reset
 
 ## Cost Estimation
 
-Estimated costs per hour:
-- **CPU only**: ~$0.05/hr
+Estimated costs per hour (from [Modal.com](https://modal.com/pricing)):
+- **CPU only**: ~$0.35/hr
 - **A10G GPU**: ~$1.10/hr
 - **A100 GPU**: ~$2.50/hr
-- **H100 GPU**: ~$4.50/hr
+- **H100 GPU**: ~$4.00/hr
 
 API token costs are additional.
 

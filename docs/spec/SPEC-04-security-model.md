@@ -505,7 +505,7 @@ class SecureCheckpointManager:
 
 ### 1. Secret Rotation Without Disrupting Running Sessions
 
-**Problem**: Modal's Secrets API does not support in-place updates—you must delete and recreate secrets.
+**Problem**: Modal's Secrets API does not support in-place updates. You must delete and recreate secrets.
 
 **Solution**: Versioned secrets with dual-key overlap periods.
 

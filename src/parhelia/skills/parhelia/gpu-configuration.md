@@ -26,10 +26,12 @@ keywords: [gpu, a10g, a100, h100, t4, cuda, ml, training, inference]
 
 | GPU | VRAM | Cost/hr | Best For |
 |-----|------|---------|----------|
-| **T4** | 16GB | ~$0.50 | Inference, light training |
+| **T4** | 16GB | ~$0.60 | Inference, light training |
 | **A10G** | 24GB | ~$1.10 | Training, medium models |
 | **A100** | 40/80GB | ~$2.50 | Large models, fast training |
-| **H100** | 80GB | ~$4.50 | Largest models, fastest training |
+| **H100** | 80GB | ~$4.00 | Largest models, fastest training |
+
+*Based on [Modal.com pricing](https://modal.com/pricing). Per-second billing.*
 
 ### GPU Selection Matrix
 
@@ -124,7 +126,7 @@ parhelia submit "Training job" --gpu A10G
 ```bash
 # Don't waste GPU on tests
 parhelia submit "Run pytest"
-# No --gpu = ~$0.05/hr instead of $1+/hr
+# No --gpu = ~$0.35/hr instead of $1+/hr
 ```
 
 ### Strategy 3: Batch Similar Work

@@ -26,13 +26,15 @@ keywords: [budget, cost, spending, limit, tracking, alert, ceiling]
 
 | Component | Rate | Notes |
 |-----------|------|-------|
-| **CPU compute** | ~$0.05/hr | Base container |
-| **T4 GPU** | ~$0.50/hr | Light ML |
+| **CPU compute** | ~$0.35/hr | Base container (4 CPU, 16GB) |
+| **T4 GPU** | ~$0.60/hr | Light ML |
 | **A10G GPU** | ~$1.10/hr | Medium ML |
 | **A100 GPU** | ~$2.50/hr | Heavy ML |
-| **H100 GPU** | ~$4.50/hr | Maximum perf |
+| **H100 GPU** | ~$4.00/hr | Maximum perf |
 | **API tokens (input)** | ~$3/1M | Claude API |
 | **API tokens (output)** | ~$15/1M | Claude API |
+
+*Based on [Modal.com pricing](https://modal.com/pricing). Per-second billing.*
 
 ### Budget States
 
@@ -117,10 +119,10 @@ max_daily_cost = 100.0
 
 | Workload | Duration | Resource | Est. Cost |
 |----------|----------|----------|-----------|
-| Quick test | 10 min | CPU | $0.01 |
-| Code review | 1 hr | CPU | $0.05 |
-| Build + test | 30 min | CPU | $0.03 |
-| ML inference | 1 hr | T4 | $0.50 |
+| Quick test | 10 min | CPU | $0.06 |
+| Code review | 1 hr | CPU | $0.35 |
+| Build + test | 30 min | CPU | $0.18 |
+| ML inference | 1 hr | T4 | $0.60 |
 | Model training | 4 hr | A10G | $4.40 |
 | Large training | 8 hr | A100 | $20.00 |
 
@@ -169,12 +171,12 @@ warning_threshold = 0.8
 
 **Bad**: GPU for non-ML work
 ```bash
-parhelia submit "Run linter" --gpu H100  # $4.50/hr for linting!
+parhelia submit "Run linter" --gpu H100  # $4.00/hr for linting!
 ```
 
 **Good**: Match resources to task
 ```bash
-parhelia submit "Run linter"  # CPU: $0.05/hr
+parhelia submit "Run linter"  # CPU: $0.35/hr
 ```
 
 ## Budget Exceeded: Recovery

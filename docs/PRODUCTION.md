@@ -91,20 +91,25 @@ Parhelia includes two GitHub Actions workflows:
 
 ### 3.1 Compute Costs
 
-| Resource | Cost | Usage |
-|----------|------|-------|
-| CPU sandbox | ~$0.0001/sec | Default for most tasks |
-| A10G GPU | ~$0.001/sec | ML workloads |
-| A100 GPU | ~$0.003/sec | Large model inference |
-| Volume storage | ~$0.20/GB/month | Checkpoints, configs |
+| Resource | Cost/sec | Cost/hr | Usage |
+|----------|----------|---------|-------|
+| CPU sandbox | ~$0.0001 | ~$0.35 | Default for most tasks |
+| A10G GPU | ~$0.0003 | ~$1.10 | ML workloads |
+| A100 GPU | ~$0.0007 | ~$2.50 | Large model inference |
+| H100 GPU | ~$0.0011 | ~$4.00 | Maximum performance |
+| Volume storage | - | ~$0.20/GB/month | Checkpoints, configs |
+
+*Pricing from [Modal.com](https://modal.com/pricing). Per-second billing means you only pay for active compute.*
 
 ### 3.2 Estimated Monthly Costs
 
 | Usage Pattern | Est. Monthly Cost |
 |---------------|-------------------|
-| Light (10 tasks/day) | $5-15 |
-| Medium (50 tasks/day) | $25-75 |
-| Heavy (200 tasks/day) | $100-300 |
+| Light (10 tasks/day, CPU) | $3-10 |
+| Medium (50 tasks/day, CPU) | $15-50 |
+| Heavy (100 tasks/day, mixed) | $50-150 |
+
+*Assumes ~10 min average task duration. GPU tasks cost 3-10x more than CPU.*
 
 ### 3.3 Cost Controls
 

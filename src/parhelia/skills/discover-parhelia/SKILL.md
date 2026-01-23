@@ -98,10 +98,12 @@ Local Machine                    Modal.com
 
 | Resource | Cost/Hour |
 |----------|-----------|
-| CPU only | ~$0.05 |
+| CPU only | ~$0.35 |
 | A10G GPU | ~$1.10 |
 | A100 GPU | ~$2.50 |
-| H100 GPU | ~$4.50 |
+| H100 GPU | ~$4.00 |
+
+*Based on [Modal.com pricing](https://modal.com/pricing). Per-second billing.*
 
 API tokens are additional (~$3/$15 per 1M input/output tokens).
 

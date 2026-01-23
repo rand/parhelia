@@ -283,10 +283,10 @@ When information is missing, prompt interactively (human mode only):
 $ parhelia submit "run tests"
 
 No GPU specified. Select compute type:
-  [1] CPU only (default, $0.05/hr)
+  [1] CPU only (default, $0.35/hr)
   [2] A10G GPU ($1.10/hr)
   [3] A100 GPU ($2.50/hr)
-  [4] H100 GPU ($4.50/hr)
+  [4] H100 GPU ($4.00/hr)
 
 Select [1]:
 ```
