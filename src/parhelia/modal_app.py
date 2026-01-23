@@ -85,6 +85,9 @@ cpu_image = (
         "procps",  # For ps, top commands
         "zstd",  # For checkpoint compression
         "sudo",  # For occasional privileged operations
+        "pkg-config",  # For Rust crates that need system libraries
+        "libssl-dev",  # OpenSSL development headers
+        "libclang-dev",  # For bindgen (FFI generation)
     ])
     .pip_install([
         "anthropic>=0.40.0",
