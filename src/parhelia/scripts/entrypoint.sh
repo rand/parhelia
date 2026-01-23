@@ -31,9 +31,10 @@ error() {
 # =============================================================================
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     log "Configuring git credential helper with GITHUB_TOKEN..."
-    # Use URL rewrite to inject token for all github.com HTTPS URLs
+    # Configure HTTPS URL rewrite (what Claude Code uses)
     git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+    # Configure SSH URL rewrite separately (different target URL prefix to avoid overwrite)
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com:".insteadOf "git@github.com:"
     log "Git configured for private repo access"
 else
     log "Warning: GITHUB_TOKEN not set, private repos will not be accessible"
