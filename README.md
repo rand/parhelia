@@ -10,7 +10,7 @@
 
 ## What is Parhelia?
 
-Parhelia dispatches Claude Code tasks to [Modal.com](https://modal.com) containers while preserving everything that makes your local setup powerful—your plugins, skills, CLAUDE.md, and MCP servers all sync automatically.
+Parhelia dispatches Claude Code tasks to [Modal.com](https://modal.com) containers while preserving everything that makes your local setup powerful: your plugins, skills, CLAUDE.md, and MCP servers all sync automatically.
 
 **Why cloud execution?**
 - Your laptop stays free while Claude works
