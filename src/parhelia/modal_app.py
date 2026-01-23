@@ -116,10 +116,12 @@ cpu_image = (
     ])
     # Add parhelia package source for remote functions
     .add_local_dir(str(_PACKAGE_DIR), f"{CONTAINER_HOME}/parhelia", copy=True)
+    # Fix ownership of entire home directory after all copies complete
+    # This is critical - Modal's copy operations run as root
     .run_commands([
-        f"chown -R {CONTAINER_USER}:{CONTAINER_USER} {CONTAINER_HOME}/parhelia",
+        f"chown -R {CONTAINER_USER}:{CONTAINER_USER} {CONTAINER_HOME}",
     ])
-    # Switch to non-root user for tool installation
+    # Install tools as non-root user (requires correct home dir ownership)
     .run_commands([
         # Install Bun for plugin tooling (as parhelia user)
         f"su - {CONTAINER_USER} -c 'curl -fsSL https://bun.sh/install | bash'",
@@ -133,7 +135,6 @@ cpu_image = (
         f"echo 'export BUN_INSTALL=\"$HOME/.bun\"' >> {CONTAINER_HOME}/.bashrc",
         f"echo 'export PATH=\"$HOME/.local/bin:$BUN_INSTALL/bin:$PATH\"' >> {CONTAINER_HOME}/.bashrc",
         f"echo 'export PYTHONPATH={CONTAINER_HOME}:$PYTHONPATH' >> {CONTAINER_HOME}/.bashrc",
-        f"chown {CONTAINER_USER}:{CONTAINER_USER} {CONTAINER_HOME}/.bashrc",
     ])
     .env({
         "PYTHONPATH": CONTAINER_HOME,
@@ -282,8 +283,8 @@ async def run_in_sandbox(
         return "".join(stdout_lines)
 
     if is_simple:
-        # Simple command as parhelia user
-        wrapper = f"su - {CONTAINER_USER} -c '{cmd_str}'"
+        # Simple command as parhelia user using sudo -E to preserve environment
+        wrapper = f"sudo -E -u {CONTAINER_USER} bash -c '{cmd_str}'"
         process = await sandbox.exec.aio("bash", "-c", wrapper)
         stdout_lines = []
         for line in process.stdout:
@@ -297,10 +298,10 @@ async def run_in_sandbox(
     if as_root:
         wrapper = f"timeout {timeout_seconds} {cmd_str} < /dev/null 2>&1"
     else:
-        # Run as parhelia user with login shell for proper PATH
-        # Escape single quotes in command for nested shell
+        # Run as parhelia user with sudo -E to preserve environment (esp. ANTHROPIC_API_KEY)
+        # Use login shell (-i) to get PATH from .bashrc
         escaped_cmd = cmd_str.replace("'", "'\\''")
-        wrapper = f"su - {CONTAINER_USER} -c 'timeout {timeout_seconds} {escaped_cmd} < /dev/null 2>&1'"
+        wrapper = f"sudo -E -u {CONTAINER_USER} bash -l -c 'timeout {timeout_seconds} {escaped_cmd} < /dev/null 2>&1'"
 
     process = await sandbox.exec.aio("bash", "-c", wrapper)
     stdout_lines = []
