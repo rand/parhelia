@@ -129,11 +129,16 @@ cpu_image = (
         f"su - {CONTAINER_USER} -c 'curl -fsSL https://claude.ai/install.sh | bash'",
         # Verify installation
         f"su - {CONTAINER_USER} -c '$HOME/.local/bin/claude --version' || echo 'Claude Code installation failed'",
+        # Install Rust via rustup (as parhelia user)
+        f"su - {CONTAINER_USER} -c 'curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'",
+        # Verify Rust installation
+        f"su - {CONTAINER_USER} -c '$HOME/.cargo/bin/rustc --version' || echo 'Rust installation failed'",
     ])
     # Configure environment for parhelia user
     .run_commands([
         f"echo 'export BUN_INSTALL=\"$HOME/.bun\"' >> {CONTAINER_HOME}/.bashrc",
-        f"echo 'export PATH=\"$HOME/.local/bin:$BUN_INSTALL/bin:$PATH\"' >> {CONTAINER_HOME}/.bashrc",
+        f"echo 'source \"$HOME/.cargo/env\"' >> {CONTAINER_HOME}/.bashrc",
+        f"echo 'export PATH=\"$HOME/.local/bin:$BUN_INSTALL/bin:$HOME/.cargo/bin:$PATH\"' >> {CONTAINER_HOME}/.bashrc",
         f"echo 'export PYTHONPATH={CONTAINER_HOME}:$PYTHONPATH' >> {CONTAINER_HOME}/.bashrc",
     ])
     .env({
