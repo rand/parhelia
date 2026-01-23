@@ -529,58 +529,77 @@ def list_sessions(ctx: CLIContext, status: str, limit: int) -> None:
 
 
 # =============================================================================
-# Submit Command
+# Task Creation Helpers
 # =============================================================================
 
 
-@cli.command()
-@click.argument("prompt")
-@click.option(
-    "-t", "--type",
-    "task_type",
-    type=click.Choice(["generic", "code_fix", "test", "build", "lint", "refactor"]),
-    default="generic",
-    help="Task type",
-)
-@click.option(
-    "--gpu",
-    type=click.Choice(["none", "A10G", "A100", "H100", "T4"]),
-    default="none",
-    help="GPU type required",
-)
-@click.option(
-    "--memory",
-    type=int,
-    default=4,
-    help="Minimum memory in GB",
-)
-@click.option(
-    "-w", "--workspace",
-    type=click.Path(exists=True),
-    help="Working directory for the task",
-)
-@click.option(
-    "--dispatch/--no-dispatch",
-    default=True,
-    help="Dispatch task to Modal immediately (default: yes)",
-)
-@click.option(
-    "--sync",
-    is_flag=True,
-    help="Wait for task completion (synchronous dispatch)",
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Skip actual Modal execution (for testing)",
-)
-@click.option(
-    "--automated",
-    is_flag=True,
-    help="Run in automated mode (skip permission prompts). Use for CI/headless execution.",
-)
-@pass_context
-def submit(
+def _has_unpushed_commits() -> bool:
+    """Check if there are local commits not pushed to remote."""
+    import subprocess
+    try:
+        # Check if we're in a git repo
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+
+        # Check for unpushed commits
+        result = subprocess.run(
+            ["git", "status", "-sb"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # Look for "ahead" indicator (e.g., "## main...origin/main [ahead 2]")
+        return "[ahead" in result.stdout
+    except Exception:
+        return False
+
+
+def _prompt_mentions_repo(prompt: str) -> bool:
+    """Check if prompt mentions cloning or repository."""
+    import re
+    patterns = [
+        r"\bclone\b",
+        r"\bgit\b",
+        r"github\.com",
+        r"gitlab\.com",
+        r"bitbucket\.org",
+        r"\brepo\b",
+        r"\brepository\b",
+        r"https?://",
+    ]
+    prompt_lower = prompt.lower()
+    return any(re.search(p, prompt_lower) for p in patterns)
+
+
+def _emit_preflight_warnings(prompt: str, no_hints: bool) -> None:
+    """Emit warnings to help agents understand the remote execution model."""
+    if no_hints:
+        return
+
+    # Check for unpushed commits
+    if _has_unpushed_commits():
+        click.secho(
+            "Warning: You have unpushed commits. Remote Claude clones from git.",
+            fg="yellow",
+        )
+        click.echo("  Hint: Run 'git push' first, or remote Claude won't see your changes.")
+
+    # Check if prompt lacks repo/clone instructions
+    if not _prompt_mentions_repo(prompt):
+        click.secho(
+            "Hint: Remote Claude cannot see local files. Include clone instructions:",
+            fg="blue",
+        )
+        click.echo('  Example: "Clone https://github.com/org/repo, checkout branch, run tests"')
+
+
+def _submit_task_impl(
     ctx: CLIContext,
     prompt: str,
     task_type: str,
@@ -591,21 +610,18 @@ def submit(
     sync: bool,
     dry_run: bool,
     automated: bool,
+    no_hints: bool = False,
 ) -> None:
-    """Submit a new task for execution.
+    """Shared implementation for task creation.
 
-    By default, tasks are dispatched to Modal immediately in async mode.
-    Use --no-dispatch to only persist the task without execution.
-    Use --sync to wait for completion.
-    Use --dry-run to test without Modal.
-    Use --automated for headless/CI execution (skips permission prompts).
-
-    Smart defaults: Memory and workspace are remembered from previous
-    invocations. GPU must be explicitly requested each time (--gpu).
+    Used by both 'task create' and legacy 'submit' commands.
     """
     import uuid
 
     from parhelia.dispatch import DispatchMode, TaskDispatcher
+
+    # Emit pre-flight warnings for agents
+    _emit_preflight_warnings(prompt, no_hints)
 
     # Smart defaults (SPEC-20.50): Remember user preferences
     smart_prompt = get_smart_prompt()
@@ -658,7 +674,7 @@ def submit(
     async def _submit_and_dispatch():
         # Always persist the task first
         task_id = await ctx.orchestrator.submit_task(task)
-        click.echo(StatusFormatter.success(f"Task submitted: {task_id}"))
+        click.echo(StatusFormatter.success(f"Task created: {task_id}"))
 
         if not dispatch:
             click.echo(StatusFormatter.info("Task saved but not dispatched (use --dispatch to run)"))
@@ -712,6 +728,93 @@ def submit(
 
 
 # =============================================================================
+# Submit Command (Legacy - use 'task create' instead)
+# =============================================================================
+
+
+@cli.command()
+@click.argument("prompt")
+@click.option(
+    "-t", "--type",
+    "task_type",
+    type=click.Choice(["generic", "code_fix", "test", "build", "lint", "refactor"]),
+    default="generic",
+    help="Task type",
+)
+@click.option(
+    "--gpu",
+    type=click.Choice(["none", "A10G", "A100", "H100", "T4"]),
+    default="none",
+    help="GPU type required",
+)
+@click.option(
+    "--memory",
+    type=int,
+    default=4,
+    help="Minimum memory in GB",
+)
+@click.option(
+    "-w", "--workspace",
+    type=click.Path(exists=True),
+    help="Working directory for the task",
+)
+@click.option(
+    "--dispatch/--no-dispatch",
+    default=True,
+    help="Dispatch task to Modal immediately (default: yes)",
+)
+@click.option(
+    "--sync",
+    is_flag=True,
+    help="Wait for task completion (synchronous dispatch)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Skip actual Modal execution (for testing)",
+)
+@click.option(
+    "--automated",
+    is_flag=True,
+    help="Run in automated mode (skip permission prompts). Use for CI/headless execution.",
+)
+@click.option(
+    "--no-hints",
+    is_flag=True,
+    help="Suppress pre-flight hints (for CI/scripts)",
+)
+@pass_context
+def submit(
+    ctx: CLIContext,
+    prompt: str,
+    task_type: str,
+    gpu: str,
+    memory: int,
+    workspace: str | None,
+    dispatch: bool,
+    sync: bool,
+    dry_run: bool,
+    automated: bool,
+    no_hints: bool,
+) -> None:
+    """Submit a new task for execution (DEPRECATED: use 'task create').
+
+    By default, tasks are dispatched to Modal immediately in async mode.
+    Use --no-dispatch to only persist the task without execution.
+    Use --sync to wait for completion.
+    Use --dry-run to test without Modal.
+    Use --automated for headless/CI execution (skips permission prompts).
+
+    Smart defaults: Memory and workspace are remembered from previous
+    invocations. GPU must be explicitly requested each time (--gpu).
+    """
+    _submit_task_impl(
+        ctx, prompt, task_type, gpu, memory, workspace,
+        dispatch, sync, dry_run, automated, no_hints,
+    )
+
+
+# =============================================================================
 # Task Command Group
 # =============================================================================
 
@@ -720,6 +823,93 @@ def submit(
 def task() -> None:
     """Task management commands."""
     pass
+
+
+@task.command("create")
+@click.argument("prompt")
+@click.option(
+    "-t", "--type",
+    "task_type",
+    type=click.Choice(["generic", "code_fix", "test", "build", "lint", "refactor"]),
+    default="generic",
+    help="Task type",
+)
+@click.option(
+    "--gpu",
+    type=click.Choice(["none", "A10G", "A100", "H100", "T4"]),
+    default="none",
+    help="GPU type required",
+)
+@click.option(
+    "--memory",
+    type=int,
+    default=4,
+    help="Minimum memory in GB",
+)
+@click.option(
+    "-w", "--workspace",
+    type=click.Path(exists=True),
+    help="Working directory for the task",
+)
+@click.option(
+    "--dispatch/--no-dispatch",
+    default=True,
+    help="Dispatch task to Modal immediately (default: yes)",
+)
+@click.option(
+    "--sync",
+    is_flag=True,
+    help="Wait for task completion (synchronous dispatch)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Skip actual Modal execution (for testing)",
+)
+@click.option(
+    "--automated",
+    is_flag=True,
+    help="Run in automated mode (skip permission prompts). Use for CI/headless execution.",
+)
+@click.option(
+    "--no-hints",
+    is_flag=True,
+    help="Suppress pre-flight hints (for CI/scripts)",
+)
+@pass_context
+def task_create(
+    ctx: CLIContext,
+    prompt: str,
+    task_type: str,
+    gpu: str,
+    memory: int,
+    workspace: str | None,
+    dispatch: bool,
+    sync: bool,
+    dry_run: bool,
+    automated: bool,
+    no_hints: bool,
+) -> None:
+    """Create and dispatch a new task for remote execution.
+
+    Remote Claude clones from git - it cannot see local files.
+    Include clone instructions in your prompt.
+
+    Examples:
+        parhelia task create "Clone github.com/org/repo, run tests"
+        parhelia task create "Build the project" --sync
+        parhelia task create "Train model" --gpu A10G --automated
+
+    By default, tasks are dispatched to Modal immediately in async mode.
+    Use --no-dispatch to only persist the task without execution.
+    Use --sync to wait for completion.
+    Use --dry-run to test without Modal.
+    Use --automated for headless/CI execution (skips permission prompts).
+    """
+    _submit_task_impl(
+        ctx, prompt, task_type, gpu, memory, workspace,
+        dispatch, sync, dry_run, automated, no_hints,
+    )
 
 
 @task.command("list")

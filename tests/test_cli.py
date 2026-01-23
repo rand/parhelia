@@ -177,10 +177,10 @@ class TestSubmitCommand:
                 mock_orch_cls.return_value = PersistentOrchestrator(
                     db_path=tmp_path / "test.db"
                 )
-                result = runner.invoke(cli, ["submit", "Test prompt", "--no-dispatch"])
+                result = runner.invoke(cli, ["submit", "Test prompt", "--no-dispatch", "--no-hints"])
 
                 assert result.exit_code == 0
-                assert "Task submitted:" in result.output
+                assert "Task created:" in result.output
 
     def test_submit_with_type(self, runner, mock_config, tmp_path):
         """submit MUST accept task type option."""
@@ -191,10 +191,10 @@ class TestSubmitCommand:
                 mock_orch_cls.return_value = PersistentOrchestrator(
                     db_path=tmp_path / "test.db"
                 )
-                result = runner.invoke(cli, ["submit", "Run tests", "-t", "test", "--no-dispatch"])
+                result = runner.invoke(cli, ["submit", "Run tests", "-t", "test", "--no-dispatch", "--no-hints"])
 
                 assert result.exit_code == 0
-                assert "Task submitted:" in result.output
+                assert "Task created:" in result.output
 
     def test_submit_with_gpu(self, runner, mock_config, tmp_path):
         """submit MUST accept GPU option."""
@@ -205,7 +205,7 @@ class TestSubmitCommand:
                 mock_orch_cls.return_value = PersistentOrchestrator(
                     db_path=tmp_path / "test.db"
                 )
-                result = runner.invoke(cli, ["submit", "GPU task", "--gpu", "A10G", "--no-dispatch"])
+                result = runner.invoke(cli, ["submit", "GPU task", "--gpu", "A10G", "--no-dispatch", "--no-hints"])
 
                 assert result.exit_code == 0
 
@@ -218,7 +218,7 @@ class TestSubmitCommand:
                 mock_orch_cls.return_value = PersistentOrchestrator(
                     db_path=tmp_path / "test.db"
                 )
-                result = runner.invoke(cli, ["submit", "Big task", "--memory", "16", "--no-dispatch"])
+                result = runner.invoke(cli, ["submit", "Big task", "--memory", "16", "--no-dispatch", "--no-hints"])
 
                 assert result.exit_code == 0
 
@@ -231,10 +231,10 @@ class TestSubmitCommand:
                 mock_orch_cls.return_value = PersistentOrchestrator(
                     db_path=tmp_path / "test.db"
                 )
-                result = runner.invoke(cli, ["submit", "Test dry run", "--dry-run"])
+                result = runner.invoke(cli, ["submit", "Test dry run", "--dry-run", "--no-hints"])
 
                 assert result.exit_code == 0
-                assert "Task submitted:" in result.output
+                assert "Task created:" in result.output
                 assert "Dispatching (dry-run)" in result.output
                 assert "Worker started:" in result.output
 
