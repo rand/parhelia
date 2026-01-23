@@ -149,10 +149,16 @@ else:
 # =============================================================================
 
 
+# Maximum memory without GPU: 336GB (344064 MiB) per Modal limits
+MAX_MEMORY_MB = 344064
+
+
 async def create_claude_sandbox(
     task_id: str,
     gpu: str | None = None,
     timeout_hours: int | None = None,
+    memory_mb: int | None = None,
+    cpu: float | None = None,
 ) -> modal.Sandbox:
     """Create a Sandbox for interactive Claude Code session.
 
@@ -166,19 +172,31 @@ async def create_claude_sandbox(
         task_id: Unique identifier for the task/session
         gpu: GPU type (A10G, A100, etc.) or None for CPU-only
         timeout_hours: Session timeout in hours (default from config)
+        memory_mb: Memory in MB (default from config, max 336GB without GPU)
+        cpu: CPU cores (default from config)
 
     Returns:
         modal.Sandbox instance ready for Claude Code execution
 
     Raises:
         ValueError: If gpu is specified but not in SUPPORTED_GPUS
+        ValueError: If memory_mb exceeds Modal's limit (336GB without GPU)
     """
     # Validate GPU type
     if gpu is not None and gpu not in SUPPORTED_GPUS:
         raise ValueError(f"Unsupported GPU '{gpu}'. Must be one of: {SUPPORTED_GPUS}")
 
+    # Use defaults from config if not specified
     if timeout_hours is None:
         timeout_hours = config.modal.default_timeout_hours
+    if memory_mb is None:
+        memory_mb = CPU_CONFIG["memory"]
+    if cpu is None:
+        cpu = CPU_CONFIG["cpu"]
+
+    # Validate memory limit
+    if memory_mb > MAX_MEMORY_MB:
+        raise ValueError(f"Memory {memory_mb}MB exceeds Modal limit of {MAX_MEMORY_MB}MB (336GB)")
 
     image = gpu_image if gpu else cpu_image
 
@@ -192,8 +210,8 @@ async def create_claude_sandbox(
         volumes={"/vol/parhelia": volume},
         gpu=gpu,
         timeout=timeout_hours * 3600,
-        cpu=CPU_CONFIG["cpu"],
-        memory=CPU_CONFIG["memory"],
+        cpu=cpu,
+        memory=memory_mb,
         # Pass task_id as environment variable for tracking/logging
         env={"PARHELIA_TASK_ID": task_id},
     )

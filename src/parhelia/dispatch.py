@@ -333,11 +333,15 @@ class TaskDispatcher:
         # Determine GPU requirement
         gpu = task.requirements.gpu_type if task.requirements.needs_gpu else None
 
+        # Convert memory from GB to MB
+        memory_mb = task.requirements.min_memory_gb * 1024
+
         # Create sandbox
         sandbox = await create_claude_sandbox(
             task_id=task.id,
             gpu=gpu,
             timeout_hours=timeout_hours,
+            memory_mb=memory_mb,
         )
 
         sandbox_id = str(sandbox.object_id) if hasattr(sandbox, "object_id") else worker_id

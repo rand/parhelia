@@ -110,10 +110,14 @@ def validate_resources(ctx: dict) -> tuple[bool, str]:
     """
     requirements = ctx.get("requirements", {})
 
-    # Check for very large memory requests
+    # Check for very large memory requests (Modal max is 336GB without GPU)
     min_memory_gb = requirements.get("min_memory_gb", 4)
-    if min_memory_gb > 128:
-        return False, f"Memory request too large: {min_memory_gb}GB (max 128GB)"
+    if min_memory_gb > 336:
+        return False, f"Memory request too large: {min_memory_gb}GB (Modal max is 336GB)"
+
+    # Warn for high memory requests (expensive)
+    if min_memory_gb >= 64:
+        return True, f"Warning: High memory request ({min_memory_gb}GB) - ~${min_memory_gb * 0.005:.2f}/hr"
 
     # Warn for expensive GPU types
     gpu_type = requirements.get("gpu_type")
