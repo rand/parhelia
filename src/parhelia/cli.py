@@ -408,9 +408,42 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
 
 
 @cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_context
-def status(ctx: CLIContext) -> None:
+def status(ctx: CLIContext, as_json: bool) -> None:
     """Show system status and health."""
+    # Orchestrator status
+    orch = ctx.orchestrator
+    pending_count = orch.get_pending_count()
+    active_workers = orch.get_active_worker_count()
+
+    # Budget status
+    budget = ctx.budget_manager
+    budget_status = budget.check_budget(raise_on_exceeded=False)
+
+    if as_json:
+        click.echo(json.dumps({
+            "configuration": {
+                "volume": ctx.config.modal.volume_name,
+                "cpu_cores": ctx.config.modal.cpu_count,
+                "memory_mb": ctx.config.modal.memory_mb,
+                "default_timeout_hours": ctx.config.modal.default_timeout_hours,
+            },
+            "orchestrator": {
+                "pending_tasks": pending_count,
+                "active_workers": active_workers,
+            },
+            "budget": {
+                "ceiling_usd": budget_status.ceiling_usd,
+                "used_usd": budget_status.used_usd,
+                "usage_percent": budget_status.usage_percent,
+                "remaining_usd": budget_status.remaining_usd,
+                "warning_threshold_reached": budget_status.warning_threshold_reached,
+                "is_exceeded": budget_status.is_exceeded,
+            },
+        }, indent=2))
+        return
+
     click.echo("Parhelia System Status")
     click.echo("=" * 40)
 
@@ -420,15 +453,10 @@ def status(ctx: CLIContext) -> None:
     click.echo(f"  CPU: {ctx.config.modal.cpu_count} cores, {ctx.config.modal.memory_mb}MB")
     click.echo(f"  Default timeout: {ctx.config.modal.default_timeout_hours}h")
 
-    # Orchestrator status
-    orch = ctx.orchestrator
     click.echo(f"\nOrchestrator:")
-    click.echo(f"  Pending tasks: {orch.get_pending_count()}")
-    click.echo(f"  Active workers: {orch.get_active_worker_count()}")
+    click.echo(f"  Pending tasks: {pending_count}")
+    click.echo(f"  Active workers: {active_workers}")
 
-    # Budget status
-    budget = ctx.budget_manager
-    budget_status = budget.check_budget(raise_on_exceeded=False)
     click.echo(f"\nBudget:")
     click.echo(f"  Ceiling: ${budget_status.ceiling_usd:.2f}")
     click.echo(f"  Used: ${budget_status.used_usd:.2f} ({budget_status.usage_percent:.1f}%)")

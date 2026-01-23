@@ -68,7 +68,9 @@ class TaskDispatcher:
     """
 
     READY_TIMEOUT_SECONDS = 60
-    CLAUDE_BIN = "/root/.local/bin/claude"
+    # Claude Code binary path for non-root parhelia user
+    # Must match CONTAINER_HOME in modal_app.py
+    CLAUDE_BIN = "/home/parhelia/.local/bin/claude"
 
     def __init__(
         self,

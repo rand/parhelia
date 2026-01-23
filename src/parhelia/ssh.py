@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pwd
 import shlex
 import subprocess
 import tempfile
@@ -288,14 +289,19 @@ class SSHServerSetup:
     - Configuring authorized keys
     """
 
+    # SSH configuration for non-root parhelia user
+    # Claude Code requires non-root for --dangerously-skip-permissions
+    CONTAINER_USER = "parhelia"
+    CONTAINER_HOME = "/home/parhelia"
+
     DEFAULT_SSHD_CONFIG = """
 # Parhelia SSH server configuration
 Port {port}
 HostKey /etc/ssh/ssh_host_ed25519_key
-PermitRootLogin yes
+PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
-AuthorizedKeysFile /root/.ssh/authorized_keys
+AuthorizedKeysFile %h/.ssh/authorized_keys
 Subsystem sftp /usr/lib/openssh/sftp-server
 UsePAM no
 """
@@ -314,10 +320,16 @@ UsePAM no
 
         This generates host keys and writes configuration.
         """
-        # Ensure .ssh directory exists
-        ssh_dir = Path("/root/.ssh")
+        # Ensure .ssh directory exists for parhelia user
+        ssh_dir = Path(f"{self.CONTAINER_HOME}/.ssh")
         ssh_dir.mkdir(parents=True, exist_ok=True)
         ssh_dir.chmod(0o700)
+        # Set ownership to parhelia user (uid/gid lookup)
+        try:
+            pw = pwd.getpwnam(self.CONTAINER_USER)
+            os.chown(ssh_dir, pw.pw_uid, pw.pw_gid)
+        except KeyError:
+            pass  # User doesn't exist yet (during image build)
 
         # Generate host key if not exists
         host_key = Path(self.config.host_key_path)
@@ -331,6 +343,12 @@ UsePAM no
                 "\n".join(self.config.authorized_keys) + "\n"
             )
             authorized_keys_file.chmod(0o600)
+            # Set ownership to parhelia user
+            try:
+                pw = pwd.getpwnam(self.CONTAINER_USER)
+                os.chown(authorized_keys_file, pw.pw_uid, pw.pw_gid)
+            except KeyError:
+                pass
 
         # Write sshd config
         await self._write_sshd_config()

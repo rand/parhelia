@@ -67,6 +67,11 @@ SUPPORTED_GPUS = ["A10G", "A100", "H100", "T4"]
 # Image Definitions - SPEC-01.11
 # =============================================================================
 
+# Non-root user for Claude Code compatibility
+# Claude Code blocks --dangerously-skip-permissions when running as root
+CONTAINER_USER = "parhelia"
+CONTAINER_HOME = f"/home/{CONTAINER_USER}"
+
 # Base image for CPU workloads
 cpu_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -79,6 +84,7 @@ cpu_image = (
         "unzip",
         "procps",  # For ps, top commands
         "zstd",  # For checkpoint compression
+        "sudo",  # For occasional privileged operations
     ])
     .pip_install([
         "anthropic>=0.40.0",
@@ -87,21 +93,17 @@ cpu_image = (
         "psutil>=5.9.0",
         "toml>=0.10.0",
     ])
+    # Create non-root user for Claude Code compatibility
+    # This is required because Claude Code blocks --dangerously-skip-permissions as root
     .run_commands([
-        # Install Bun for plugin tooling
-        "curl -fsSL https://bun.sh/install | bash",
-        # Add bun and local bin to PATH
-        "echo 'export BUN_INSTALL=\"$HOME/.bun\"' >> ~/.bashrc",
-        "echo 'export PATH=\"$HOME/.local/bin:$BUN_INSTALL/bin:$PATH\"' >> ~/.bashrc",
-        # Create local bin directory
-        "mkdir -p $HOME/.local/bin",
-        # Install Claude Code native binary
-        # The installer downloads and runs 'claude install' which installs to ~/.local/share/claude
-        # and creates a symlink at ~/.local/bin/claude
-        # Note: Must use bash (not sh) as the installer uses bash features
-        "curl -fsSL https://claude.ai/install.sh | bash",
-        # Verify installation
-        "$HOME/.local/bin/claude --version || echo 'Claude Code installation failed'",
+        # Create user with home directory
+        f"useradd -m -s /bin/bash {CONTAINER_USER}",
+        # Add to sudo group for occasional privileged ops (passwordless)
+        f"usermod -aG sudo {CONTAINER_USER}",
+        "echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers",
+        # Create volume mount point with proper ownership
+        "mkdir -p /vol/parhelia",
+        f"chown -R {CONTAINER_USER}:{CONTAINER_USER} /vol/parhelia",
     ])
     # Copy entrypoint script into the image (copy=True needed for subsequent run_commands)
     .add_local_file(
@@ -113,12 +115,31 @@ cpu_image = (
         "chmod +x /entrypoint.sh",
     ])
     # Add parhelia package source for remote functions
-    # Use add_local_dir for src/ layout compatibility
-    .add_local_dir(str(_PACKAGE_DIR), "/root/parhelia", copy=True)
+    .add_local_dir(str(_PACKAGE_DIR), f"{CONTAINER_HOME}/parhelia", copy=True)
     .run_commands([
-        "echo 'export PYTHONPATH=/root:$PYTHONPATH' >> ~/.bashrc",
+        f"chown -R {CONTAINER_USER}:{CONTAINER_USER} {CONTAINER_HOME}/parhelia",
     ])
-    .env({"PYTHONPATH": "/root"})
+    # Switch to non-root user for tool installation
+    .run_commands([
+        # Install Bun for plugin tooling (as parhelia user)
+        f"su - {CONTAINER_USER} -c 'curl -fsSL https://bun.sh/install | bash'",
+        # Install Claude Code native binary (as parhelia user)
+        f"su - {CONTAINER_USER} -c 'curl -fsSL https://claude.ai/install.sh | bash'",
+        # Verify installation
+        f"su - {CONTAINER_USER} -c '$HOME/.local/bin/claude --version' || echo 'Claude Code installation failed'",
+    ])
+    # Configure environment for parhelia user
+    .run_commands([
+        f"echo 'export BUN_INSTALL=\"$HOME/.bun\"' >> {CONTAINER_HOME}/.bashrc",
+        f"echo 'export PATH=\"$HOME/.local/bin:$BUN_INSTALL/bin:$PATH\"' >> {CONTAINER_HOME}/.bashrc",
+        f"echo 'export PYTHONPATH={CONTAINER_HOME}:$PYTHONPATH' >> {CONTAINER_HOME}/.bashrc",
+        f"chown {CONTAINER_USER}:{CONTAINER_USER} {CONTAINER_HOME}/.bashrc",
+    ])
+    .env({
+        "PYTHONPATH": CONTAINER_HOME,
+        "HOME": CONTAINER_HOME,
+        "USER": CONTAINER_USER,
+    })
 )
 
 # GPU image extends CPU with CUDA support
@@ -212,8 +233,13 @@ async def create_claude_sandbox(
         timeout=timeout_hours * 3600,
         cpu=cpu,
         memory=memory_mb,
-        # Pass task_id as environment variable for tracking/logging
-        env={"PARHELIA_TASK_ID": task_id},
+        # Pass task_id and user context as environment variables
+        env={
+            "PARHELIA_TASK_ID": task_id,
+            "HOME": CONTAINER_HOME,
+            "USER": CONTAINER_USER,
+            "PYTHONPATH": CONTAINER_HOME,
+        },
     )
 
     return sandbox
@@ -223,26 +249,42 @@ async def run_in_sandbox(
     sandbox: modal.Sandbox,
     command: list[str],
     timeout_seconds: int = 300,
+    as_root: bool = False,
 ) -> str:
     """Execute command in sandbox and return output.
 
-    Uses file-based output capture to avoid Modal stdout streaming issues
-    with long-running processes like Claude Code.
+    Commands run as the non-root parhelia user by default. This is required
+    for Claude Code compatibility (it blocks --dangerously-skip-permissions as root).
 
     Args:
         sandbox: The Modal Sandbox instance
         command: Command and arguments to execute
         timeout_seconds: Maximum time to wait for command (default 5 minutes)
+        as_root: Run as root instead of parhelia user (default False)
 
     Returns:
         stdout from the command
     """
-    import uuid
+    # Build command string with proper escaping
+    cmd_str = " ".join(f'"{c}"' if " " in c else c for c in command)
 
-    # For simple commands (ls, echo, cat), use direct stdout
+    # For simple commands (ls, echo, cat), use direct execution
     simple_commands = {"ls", "cat", "echo", "pwd", "env", "whoami", "which", "head", "tail"}
-    if command and command[0].split("/")[-1] in simple_commands:
+    is_simple = command and command[0].split("/")[-1] in simple_commands
+
+    if is_simple and as_root:
+        # Simple command as root - direct execution
         process = await sandbox.exec.aio(*command)
+        stdout_lines = []
+        for line in process.stdout:
+            stdout_lines.append(line)
+        await process.wait.aio()
+        return "".join(stdout_lines)
+
+    if is_simple:
+        # Simple command as parhelia user
+        wrapper = f"su - {CONTAINER_USER} -c '{cmd_str}'"
+        process = await sandbox.exec.aio("bash", "-c", wrapper)
         stdout_lines = []
         for line in process.stdout:
             stdout_lines.append(line)
@@ -252,10 +294,13 @@ async def run_in_sandbox(
     # For complex commands (like Claude Code), close stdin to ensure clean exit.
     # Claude Code in -p mode waits for stdin by default; closing it with < /dev/null
     # allows the process to exit cleanly after producing output.
-    cmd_str = " ".join(f'"{c}"' if " " in c else c for c in command)
-
-    # Run with timeout and closed stdin
-    wrapper = f"timeout {timeout_seconds} {cmd_str} < /dev/null 2>&1"
+    if as_root:
+        wrapper = f"timeout {timeout_seconds} {cmd_str} < /dev/null 2>&1"
+    else:
+        # Run as parhelia user with login shell for proper PATH
+        # Escape single quotes in command for nested shell
+        escaped_cmd = cmd_str.replace("'", "'\\''")
+        wrapper = f"su - {CONTAINER_USER} -c 'timeout {timeout_seconds} {escaped_cmd} < /dev/null 2>&1'"
 
     process = await sandbox.exec.aio("bash", "-c", wrapper)
     stdout_lines = []
@@ -517,12 +562,12 @@ def main(
             output = await run_in_sandbox(sandbox, ["echo", "Hello from Parhelia!"])
             print(f"Output: {output}")
 
-            # Check Claude
+            # Check Claude (runs as parhelia user by default)
             print("\nChecking Claude Code...")
             try:
                 claude_output = await run_in_sandbox(
                     sandbox,
-                    ["/root/.claude/local/claude", "--version"],
+                    [f"{CONTAINER_HOME}/.local/bin/claude", "--version"],
                 )
                 print(f"Claude version: {claude_output}")
             except Exception as e:

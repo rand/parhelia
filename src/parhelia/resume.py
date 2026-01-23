@@ -101,7 +101,8 @@ class ResumeManager:
     - Running Claude Code with --resume flag
     """
 
-    CLAUDE_BINARY = "/root/.claude/local/claude"
+    # Claude Code binary path for non-root parhelia user
+    CLAUDE_BINARY = "/home/parhelia/.local/bin/claude"
     DEFAULT_TIMEOUT = 300  # 5 minutes for resume
 
     def __init__(

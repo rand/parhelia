@@ -17,7 +17,8 @@ VOLUME_ROOT = os.environ.get("PARHELIA_VOLUME_ROOT", "/vol/parhelia")
 VOLUME_CONFIG_PATH = f"{VOLUME_ROOT}/config/claude"
 WORKSPACE_DIR = f"{VOLUME_ROOT}/workspaces"
 READY_FILE_PATH = "/tmp/ready"
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "/root/.claude/local/claude")
+# Claude Code binary path - default for non-root parhelia user
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "/home/parhelia/.local/bin/claude")
 
 
 def log(message: str) -> None:
