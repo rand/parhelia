@@ -1,6 +1,6 @@
 # Parhelia
 
-**Remote Claude Code execution with checkpoint/resume, GPU support, and full local configuration sync.**
+**Run Claude Code in the cloud. Keep your local config. Resume after failures.**
 
 [![Tests](https://img.shields.io/badge/tests-1479%20passing-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.11+-blue)]()
@@ -8,18 +8,22 @@
 
 ---
 
-## Why Parhelia?
+## What is Parhelia?
 
-Local Claude Code sessions hit limits during intensive work. Full test suites exhaust memory, large builds max out CPU, GPU workloads require specialized hardware. Network disconnections lose hours of progress.
+Parhelia dispatches Claude Code tasks to [Modal.com](https://modal.com) containers while preserving everything that makes your local setup powerful—your plugins, skills, CLAUDE.md, and MCP servers all sync automatically.
 
-Parhelia runs Claude Code on Modal.com while syncing your local configuration:
+**Why cloud execution?**
+- Your laptop stays free while Claude works
+- Access GPUs (A10G, A100, H100) for ML tasks
+- Sessions checkpoint and resume after crashes or disconnects
+- Run multiple tasks in parallel across workers
 
-- **Your full configuration**: plugins, skills, CLAUDE.md, MCP servers
-- **Checkpoint/resume**: Sessions survive container restarts and network failures
-- **GPU access**: A10G, A100, H100 for ML workloads
-- **Parallel execution**: Dispatch multiple tasks across workers
-- **Budget controls**: Set spending limits, track costs in real-time
-- **Interactive sessions**: SSH/tmux attachment for debugging
+**Why Parhelia over raw Modal?**
+- Your full Claude Code configuration syncs automatically
+- Checkpoint/resume survives container restarts
+- Budget controls prevent runaway costs
+- SSH/tmux attachment for interactive debugging
+- Local state tracking with drift reconciliation
 
 ---
 
@@ -27,7 +31,8 @@ Parhelia runs Claude Code on Modal.com while syncing your local configuration:
 
 ```bash
 # Install Parhelia
-uv pip install -e .
+uv tool install parhelia
+# Or for development: uv tool install --editable /path/to/parhelia
 
 # Configure Modal (one-time setup)
 modal token set
@@ -36,8 +41,8 @@ modal secret create anthropic-api-key ANTHROPIC_API_KEY=sk-ant-...
 # Deploy to Modal
 modal deploy src/parhelia/modal_app.py
 
-# Create your first task
-parhelia task create "List the files in /tmp and count them" --sync
+# Run your first task
+parhelia task create "Run pytest and fix any failing tests" --sync
 ```
 
 ---
@@ -263,7 +268,7 @@ max_concurrent_workers = 10
 [reconciler]
 poll_interval_seconds = 60
 stale_threshold_seconds = 300
-auto_terminate_orphans = false
+auto_terminate_orphans = true  # Recommended: auto-cleanup orphaned containers
 ```
 
 ### Modal Secrets
@@ -280,12 +285,14 @@ modal secret create github-token GITHUB_TOKEN=ghp_...
 
 ## Container Variants
 
-| Variant | Resources | Use Case | Cost |
-|---------|-----------|----------|------|
-| **CPU** | 4 CPU, 16GB RAM | Tests, builds, general coding | ~$0.0001/sec |
-| **A10G** | + 24GB VRAM | ML inference, medium training | ~$0.001/sec |
-| **A100** | + 40/80GB VRAM | Large model training | ~$0.003/sec |
-| **H100** | + 80GB VRAM | Maximum performance | ~$0.005/sec |
+| Variant | Resources | Use Case | Cost/hr | Cost/sec |
+|---------|-----------|----------|---------|----------|
+| **CPU** | 4 CPU, 16GB RAM | Tests, builds, general coding | ~$0.35 | ~$0.0001 |
+| **A10G** | + 24GB VRAM | ML inference, medium training | ~$1.10 | ~$0.0003 |
+| **A100** | + 40/80GB VRAM | Large model training | ~$2.50 | ~$0.0007 |
+| **H100** | + 80GB VRAM | Maximum performance | ~$4.00 | ~$0.0011 |
+
+*Pricing from [Modal.com](https://modal.com/pricing). You only pay for active compute time.*
 
 ```bash
 # Request specific GPU
@@ -382,9 +389,11 @@ parhelia task create "Large task" --estimate-only
 
 | Usage Pattern | Est. Monthly Cost |
 |---------------|-------------------|
-| Light (10 tasks/day, CPU) | $5-15 |
-| Medium (50 tasks/day, CPU) | $25-75 |
-| Heavy (200 tasks/day, mixed GPU) | $100-300 |
+| Light (10 tasks/day, CPU only) | $3-10 |
+| Medium (50 tasks/day, CPU only) | $15-50 |
+| Heavy (100 tasks/day, mostly CPU, some GPU) | $50-150 |
+
+*Assumes ~10 min average task duration. GPU tasks (A10G+) cost 3-10x more than CPU.*
 
 ---
 
