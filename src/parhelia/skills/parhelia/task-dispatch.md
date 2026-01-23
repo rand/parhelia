@@ -12,6 +12,23 @@ keywords: [dispatch, submit, task, async, sync, modal, execution]
 **Last Updated**: 2026-01-21
 **Format Version**: 1.0 (Atomic)
 
+## CRITICAL: What Parhelia Actually Does
+
+**Parhelia dispatches a NEW Claude Code instance to a cloud container.**
+
+It does NOT:
+- Run shell commands remotely (use `session attach` for that)
+- Access your local filesystem (remote Claude clones from git)
+- Access private repos without GITHUB_TOKEN configured on Modal
+
+**For private repos, you MUST push first:**
+```bash
+git push origin my-branch
+parhelia task create "Clone github.com/org/repo, checkout my-branch, run tests"
+```
+
+The prompt you provide becomes the initial instruction for a fresh Claude Code session running in Modal.
+
 ## When to Use This Skill
 
 - Submitting tasks for remote execution
@@ -56,7 +73,7 @@ CREATED → PENDING → DISPATCHED → RUNNING → COMPLETED
 **When**: Background task, don't need immediate result
 
 ```bash
-parhelia submit "Run the full test suite"
+parhelia task create "Run the full test suite"
 ```
 
 Output:
@@ -76,7 +93,7 @@ parhelia task show task-abc12345
 **When**: Need result immediately, task is short
 
 ```bash
-parhelia submit "Check if the build passes" --sync
+parhelia task create "Check if the build passes" --sync
 ```
 
 Blocks until completion, then shows output.
@@ -86,7 +103,7 @@ Blocks until completion, then shows output.
 **When**: ML training, inference, CUDA workloads
 
 ```bash
-parhelia submit "Train the model on the dataset" --gpu A10G
+parhelia task create "Train the model on the dataset" --gpu A10G
 ```
 
 GPU options: `A10G`, `A100`, `H100`, `T4`
@@ -96,7 +113,7 @@ GPU options: `A10G`, `A100`, `H100`, `T4`
 **When**: Test dispatch without Modal execution
 
 ```bash
-parhelia submit "Test task" --dry-run
+parhelia task create "Test task" --dry-run
 ```
 
 Validates task creation and dispatch logic without cost.
@@ -106,7 +123,7 @@ Validates task creation and dispatch logic without cost.
 **When**: Optimize for specific workload
 
 ```bash
-parhelia submit "Fix the auth bug" --type code_fix
+parhelia task create "Fix the auth bug" --type code_fix
 ```
 
 Task type influences worker selection and resource allocation.
@@ -116,7 +133,7 @@ Task type influences worker selection and resource allocation.
 Configure resource requirements:
 
 ```bash
-parhelia submit "Heavy computation" \
+parhelia task create "Heavy computation" \
   --gpu A100 \
   --memory 32 \
   --workspace /path/to/project
@@ -158,42 +175,67 @@ parhelia submit "Heavy computation" \
 
 ## Anti-Patterns
 
-### Anti-Pattern 1: Sync for Long Tasks
+### Anti-Pattern 1: Expecting Local Filesystem Access
+
+**Bad**: Assuming remote Claude can see your files
+```bash
+parhelia task create "Run the tests in ./src"  # Remote can't see ./src!
+```
+
+**Good**: Be explicit about cloning
+```bash
+parhelia task create "Clone github.com/me/repo, then run pytest"
+```
+
+### Anti-Pattern 2: Dispatching Without Pushing (Private Repos)
+
+**Bad**: Your unpushed changes are invisible to remote
+```bash
+# Local changes not pushed
+parhelia task create "Test my new feature"  # Remote clones old code!
+```
+
+**Good**: Push first
+```bash
+git push origin feature-branch
+parhelia task create "Clone repo, checkout feature-branch, run tests"
+```
+
+### Anti-Pattern 3: Sync for Long Tasks
 
 **Bad**: Using `--sync` for multi-hour tasks
 ```bash
-parhelia submit "Train for 100 epochs" --sync  # Blocks CLI for hours
+parhelia task create "Train for 100 epochs" --sync  # Blocks CLI for hours
 ```
 
 **Good**: Use async and attach
 ```bash
-parhelia submit "Train for 100 epochs"
-parhelia attach task-abc12345
+parhelia task create "Train for 100 epochs"
+parhelia session attach task-abc12345
 ```
 
-### Anti-Pattern 2: Wrong GPU Selection
+### Anti-Pattern 4: Wrong GPU Selection
 
 **Bad**: Using H100 for small inference
 ```bash
-parhelia submit "Run one prediction" --gpu H100  # Expensive overkill
+parhelia task create "Run one prediction" --gpu H100  # Expensive overkill
 ```
 
 **Good**: Match GPU to workload
 ```bash
-parhelia submit "Run one prediction" --gpu T4  # Sufficient and cheaper
+parhelia task create "Run one prediction" --gpu T4  # Sufficient and cheaper
 ```
 
-### Anti-Pattern 3: Missing Workspace
+### Anti-Pattern 5: Using Parhelia for Quick Local Tasks
 
-**Bad**: Forgetting workspace context
+**Bad**: Dispatching what should run locally
 ```bash
-cd /other/dir
-parhelia submit "Run pytest"  # Wrong directory
+parhelia task create "Run cargo check"  # Just run it locally!
 ```
 
-**Good**: Explicit workspace
+**Good**: Run quick tasks locally
 ```bash
-parhelia submit "Run pytest" --workspace /path/to/project
+cargo check  # Faster, no overhead
 ```
 
 ## Error Handling
@@ -228,7 +270,7 @@ Task not found: task-xyz
 
 **Solutions**:
 1. Check task ID spelling
-2. List tasks: `parhelia list`
+2. List tasks: `parhelia task list`
 3. Task may have been cleaned up
 
 ## Related Skills

@@ -76,7 +76,7 @@ region = "us-west"  # instead of us-east
 **3. Resource Unavailable**
 ```bash
 # GPU might be scarce - try different type
-parhelia submit "Task" --gpu A10G  # instead of H100
+parhelia task create "Task" --gpu A10G  # instead of H100
 ```
 
 **4. Budget Exceeded**
@@ -95,7 +95,7 @@ parhelia budget set 50.0  # increase if needed
 ### Diagnostics
 ```bash
 parhelia task show <id>  # Check state
-parhelia attach <id> --verbose
+parhelia session attach <id> --verbose
 ```
 
 ### Solutions
@@ -182,7 +182,7 @@ parhelia logs <id> --tail 50
 **1. Claude Code Hung**
 ```bash
 # Attach and check
-parhelia attach <id>
+parhelia session attach <id>
 # In tmux, check Claude Code status
 ps aux | grep claude
 ```
@@ -199,7 +199,7 @@ parhelia session recover <id>
 # Container might be fine but unreachable
 # Wait and retry
 sleep 60
-parhelia attach <id>
+parhelia session attach <id>
 ```
 
 ## Issue: High Unexpected Costs
@@ -211,7 +211,7 @@ parhelia attach <id>
 ### Diagnostics
 ```bash
 parhelia budget show
-parhelia list --status completed | head -20
+parhelia task list --status completed | head -20
 ```
 
 ### Solutions
@@ -219,7 +219,7 @@ parhelia list --status completed | head -20
 **1. Long-Running Sessions**
 ```bash
 # Check for sessions still running
-parhelia list --status running
+parhelia task list --status running
 
 # Kill unnecessary sessions
 parhelia session kill <id>
@@ -231,13 +231,13 @@ parhelia session kill <id>
 parhelia task show <id> | grep gpu
 
 # Use CPU for non-ML tasks
-parhelia submit "Task"  # No --gpu
+parhelia task create "Task"  # No --gpu
 ```
 
 **3. Forgotten Sessions**
 ```bash
 # List all sessions
-parhelia list
+parhelia task list
 
 # Set auto-timeout
 # parhelia.toml
@@ -303,7 +303,7 @@ parhelia logs <id> --tail 200 | grep -i "error\|killed\|oom"
 **1. Out of Memory**
 ```bash
 # Increase memory
-parhelia submit "Task" --memory 32
+parhelia task create "Task" --memory 32
 ```
 
 **2. Disk Full**
@@ -327,7 +327,7 @@ parhelia logs <id> | grep entrypoint
 | `parhelia task show <id>` | Task details |
 | `parhelia logs <id>` | Container logs |
 | `parhelia budget show` | Cost tracking |
-| `parhelia list --status running` | Active sessions |
+| `parhelia task list --status running` | Active sessions |
 | `parhelia checkpoint list` | Available checkpoints |
 | `parhelia config --json` | Configuration dump |
 

@@ -85,13 +85,13 @@ Clears usage tracking (for new billing period).
 
 ```bash
 # Estimate cost first with dry-run
-parhelia submit "Train model" --gpu A10G --dry-run
+parhelia task create "Train model" --gpu A10G --dry-run
 
 # Check remaining budget
 parhelia budget show
 
 # Submit if budget allows
-parhelia submit "Train model" --gpu A10G
+parhelia task create "Train model" --gpu A10G
 ```
 
 ## Configuration
@@ -171,12 +171,12 @@ warning_threshold = 0.8
 
 **Bad**: GPU for non-ML work
 ```bash
-parhelia submit "Run linter" --gpu H100  # $4.00/hr for linting!
+parhelia task create "Run linter" --gpu H100  # $4.00/hr for linting!
 ```
 
 **Good**: Match resources to task
 ```bash
-parhelia submit "Run linter"  # CPU: $0.35/hr
+parhelia task create "Run linter"  # CPU: $0.35/hr
 ```
 
 ## Budget Exceeded: Recovery
@@ -202,16 +202,16 @@ Dispatch failed: Task would exceed budget ceiling ($10.00)
 3. **Reduce task cost**:
    ```bash
    # Use CPU instead of GPU
-   parhelia submit "Task"
-   # Instead of: parhelia submit "Task" --gpu A100
+   parhelia task create "Task"
+   # Instead of: parhelia task create "Task" --gpu A100
    ```
 
 4. **Break into smaller tasks**:
    ```bash
    # Instead of one long task
-   parhelia submit "Part 1 of work"
+   parhelia task create "Part 1 of work"
    # ... complete, then
-   parhelia submit "Part 2 of work"
+   parhelia task create "Part 2 of work"
    ```
 
 ## Monitoring Tips

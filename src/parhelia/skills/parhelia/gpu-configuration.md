@@ -52,7 +52,7 @@ keywords: [gpu, a10g, a100, h100, t4, cuda, ml, training, inference]
 **When**: Running predictions, not training
 
 ```bash
-parhelia submit "Run inference on the test set" --gpu T4
+parhelia task create "Run inference on the test set" --gpu T4
 ```
 
 T4 is cost-effective for inference workloads.
@@ -62,7 +62,7 @@ T4 is cost-effective for inference workloads.
 **When**: Model training, fine-tuning
 
 ```bash
-parhelia submit "Fine-tune the model for 10 epochs" --gpu A10G
+parhelia task create "Fine-tune the model for 10 epochs" --gpu A10G
 ```
 
 A10G balances cost and capability for most training.
@@ -72,7 +72,7 @@ A10G balances cost and capability for most training.
 **When**: Working with >13B parameter models
 
 ```bash
-parhelia submit "Train the 70B model" --gpu A100
+parhelia task create "Train the 70B model" --gpu A100
 ```
 
 A100's 80GB VRAM handles large models.
@@ -82,7 +82,7 @@ A100's 80GB VRAM handles large models.
 **When**: Time-critical, budget allows
 
 ```bash
-parhelia submit "Train as fast as possible" --gpu H100
+parhelia task create "Train as fast as possible" --gpu H100
 ```
 
 H100 provides maximum throughput.
@@ -92,7 +92,7 @@ H100 provides maximum throughput.
 **When**: Non-ML tasks
 
 ```bash
-parhelia submit "Run the test suite"
+parhelia task create "Run the test suite"
 # No --gpu flag = CPU only
 ```
 
@@ -115,17 +115,17 @@ Save money when GPU isn't needed.
 
 ```bash
 # Try T4 first
-parhelia submit "Training job" --gpu T4 --dry-run
+parhelia task create "Training job" --gpu T4 --dry-run
 
 # If OOM or too slow, upgrade
-parhelia submit "Training job" --gpu A10G
+parhelia task create "Training job" --gpu A10G
 ```
 
 ### Strategy 2: Use CPU for Non-ML
 
 ```bash
 # Don't waste GPU on tests
-parhelia submit "Run pytest"
+parhelia task create "Run pytest"
 # No --gpu = ~$0.35/hr instead of $1+/hr
 ```
 
@@ -133,7 +133,7 @@ parhelia submit "Run pytest"
 
 ```bash
 # One GPU session for multiple tasks
-parhelia submit "Train model A, then model B, then model C" --gpu A10G
+parhelia task create "Train model A, then model B, then model C" --gpu A10G
 # Better than 3 separate GPU sessions (saves cold start)
 ```
 
@@ -143,36 +143,36 @@ parhelia submit "Train model A, then model B, then model C" --gpu A10G
 
 **Bad**: Using GPU for non-ML tasks
 ```bash
-parhelia submit "Format the code" --gpu A100  # Waste!
+parhelia task create "Format the code" --gpu A100  # Waste!
 ```
 
 **Good**: CPU for non-ML
 ```bash
-parhelia submit "Format the code"  # No GPU
+parhelia task create "Format the code"  # No GPU
 ```
 
 ### Anti-Pattern 2: Oversized GPU
 
 **Bad**: H100 for small inference
 ```bash
-parhelia submit "Run small model prediction" --gpu H100  # Overkill
+parhelia task create "Run small model prediction" --gpu H100  # Overkill
 ```
 
 **Good**: Match GPU to workload
 ```bash
-parhelia submit "Run small model prediction" --gpu T4
+parhelia task create "Run small model prediction" --gpu T4
 ```
 
 ### Anti-Pattern 3: Undersized GPU
 
 **Bad**: T4 for large model training
 ```bash
-parhelia submit "Train 70B model" --gpu T4  # Will OOM
+parhelia task create "Train 70B model" --gpu T4  # Will OOM
 ```
 
 **Good**: Sufficient VRAM
 ```bash
-parhelia submit "Train 70B model" --gpu A100
+parhelia task create "Train 70B model" --gpu A100
 ```
 
 ## Debugging GPU Issues

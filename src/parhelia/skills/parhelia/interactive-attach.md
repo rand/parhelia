@@ -66,7 +66,7 @@ Parhelia uses tmux for session persistence:
 **When**: Connect to running session
 
 ```bash
-parhelia attach task-abc12345
+parhelia session attach task-abc12345
 ```
 
 Output:
@@ -123,13 +123,13 @@ Ctrl+B, 0-9     # Switch to window by number
 
 ```bash
 # Just attach again - tmux preserves state
-parhelia attach task-abc12345
+parhelia session attach task-abc12345
 ```
 
 ## Attach Flow Detail
 
 ```
-1. parhelia attach <task-id>
+1. parhelia session attach <task-id>
    └─ Validate task exists
 
 2. Get session info from orchestrator
@@ -173,7 +173,7 @@ Ctrl+B, D  # Clean detach, checkpoint created
 
 **Bad**: Leaving sessions running unmonitored
 ```bash
-parhelia attach task-123
+parhelia session attach task-123
 # Detach and forget
 # Session runs for 24h, burns budget
 ```
@@ -188,15 +188,15 @@ parhelia session kill task-123  # When done
 
 **Bad**: Opening many parallel attachments
 ```bash
-# Terminal 1: parhelia attach task-123
-# Terminal 2: parhelia attach task-123
-# Terminal 3: parhelia attach task-123
+# Terminal 1: parhelia session attach task-123
+# Terminal 2: parhelia session attach task-123
+# Terminal 3: parhelia session attach task-123
 # All fighting for same tmux session
 ```
 
 **Good**: One attachment at a time
 ```bash
-parhelia attach task-123
+parhelia session attach task-123
 # Use tmux windows for multiple terminals
 Ctrl+B, c  # New window within same session
 ```
@@ -249,7 +249,7 @@ For debugging, you can SSH directly:
 
 ```bash
 # Get tunnel info
-parhelia attach task-123 --info-only
+parhelia session attach task-123 --info-only
 
 # Manual SSH
 ssh -p 2222 -o StrictHostKeyChecking=no root@localhost
