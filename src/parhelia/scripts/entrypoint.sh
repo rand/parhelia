@@ -27,7 +27,20 @@ error() {
 }
 
 # =============================================================================
-# 1. Link configuration
+# 1. Configure git credentials for private repo access
+# =============================================================================
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    log "Configuring git credential helper with GITHUB_TOKEN..."
+    # Use URL rewrite to inject token for all github.com HTTPS URLs
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+    log "Git configured for private repo access"
+else
+    log "Warning: GITHUB_TOKEN not set, private repos will not be accessible"
+fi
+
+# =============================================================================
+# 2. Link configuration
 # =============================================================================
 log "Linking Claude configuration from volume..."
 
@@ -40,7 +53,7 @@ else
 fi
 
 # =============================================================================
-# 2. Verify Claude Code installation
+# 3. Verify Claude Code installation
 # =============================================================================
 log "Verifying Claude Code installation..."
 
@@ -56,7 +69,7 @@ else
 fi
 
 # =============================================================================
-# 3. Start MCP servers (if launcher exists)
+# 4. Start MCP servers (if launcher exists)
 # =============================================================================
 if command -v parhelia-mcp-launcher &> /dev/null; then
     log "Starting MCP servers..."
@@ -68,7 +81,7 @@ else
 fi
 
 # =============================================================================
-# 4. Initialize tmux session
+# 5. Initialize tmux session
 # =============================================================================
 log "Initializing tmux session..."
 
@@ -83,14 +96,14 @@ tmux new-session -d -s main -c "${WORKSPACE_DIR}"
 log "tmux session 'main' created in ${WORKSPACE_DIR}"
 
 # =============================================================================
-# 5. Signal ready
+# 6. Signal ready
 # =============================================================================
 log "Signaling readiness..."
 echo "PARHELIA_READY" > "${READY_FILE}"
 log "Container ready (${READY_FILE} written)"
 
 # =============================================================================
-# 6. Idle monitoring and auto-termination
+# 7. Idle monitoring and auto-termination
 # =============================================================================
 IDLE_TIMEOUT_MINUTES="${PARHELIA_IDLE_TIMEOUT:-30}"
 IDLE_CHECK_INTERVAL=60  # Check every 60 seconds
